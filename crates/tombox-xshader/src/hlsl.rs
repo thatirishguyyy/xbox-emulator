@@ -2013,15 +2013,13 @@ impl<'a> Emitter<'a> {
                     // CBV descriptors sit on a 32-byte stride (cb1 is loaded from table offset
                     // 0x20 in MainOnePassPointLightPS).
                     let bsym = sym.get(&b).copied().or_else(|| (!written.contains(&b)).then_some(Sym::Table(b as u8)));
-                    if let Some(Sym::Table(root)) = bsym {
-                        if let Some(slot) = self.direct_raw_binding(root) {
-                            self.res.insert(idx, vec![Res::RawSrv(slot)]);
-                            for k in 0..n {
-                                sym.remove(&(d + k as u16));
-                                written.insert(d + k as u16);
-                            }
-                            continue;
+                    if let Some(slot) = self.raw_binding(bsym) {
+                        self.res.insert(idx, vec![Res::RawSrv(slot)]);
+                        for k in 0..n {
+                            sym.remove(&(d + k as u16));
+                            written.insert(d + k as u16);
                         }
+                        continue;
                     }
                     let cands = self.desc_candidates(bsym.as_ref(), 32).ok_or_else(|| {
                         format!("s_buffer_load at {:#x}: base s{b} is not a buffer descriptor ({:?})", ins.offset, sym.get(&b))
@@ -2067,6 +2065,12 @@ impl<'a> Emitter<'a> {
                 Enc::Mubuf | Enc::Mtbuf => {
                     let rs = ins.src.get(1).and_then(sg).ok_or("mubuf: bad srsrc")?;
                     let rsym = sym.get(&rs).copied().or_else(|| (!written.contains(&rs)).then_some(Sym::Table(rs as u8)));
+                    if ins.mnemonic.starts_with("buffer_load_dword") {
+                        if let Some(slot) = self.raw_binding(rsym) {
+                            self.res.insert(idx, vec![Res::RawSrv(slot)]);
+                            continue;
+                        }
+                    }
                     let cands = self.desc_candidates(rsym.as_ref(), 32).ok_or_else(|| {
                         format!("mubuf at {:#x}: s{rs} not a buffer descriptor ({:?})", ins.offset, sym.get(&rs))
                     })?;
@@ -5113,7 +5117,32 @@ impl<'a> Emitter<'a> {
             }
             return Ok(());
         }
-        let (slot, is_uav) = match self.res.get(&idx).and_then(|v| v.first()) {
+        let resource = self.res.get(&idx).and_then(|v| v.first()).copied();
+        if let Some(Res::RawSrv(slot)) = resource {
+            if ins.aux.mask & 2 != 0 {
+                return Err("raw PSO buffer read with IDXEN needs a descriptor stride".into());
+            }
+            let n = Self::mubuf_dwords(&ins.mnemonic).ok_or("unsupported raw PSO buffer read")?;
+            let mut address = format!("{:#x}u", ins.aux.imm as u32);
+            if ins.aux.mask & 1 != 0 {
+                address.push_str(&format!(" + {}", r(&ins.src[0])?));
+            }
+            if !matches!(ins.src[2], Opnd::ConstInt(0) | Opnd::Null) {
+                address.push_str(&format!(" + {}", r(&ins.src[2])?));
+            }
+            let Opnd::Vgpr(dst) = ins.dst[0] else { return Err("bad raw buffer vdata".into()) };
+            let t = self.tmp;
+            self.tmp += 1;
+            self.line(&format!("uint t{t} = {address};"));
+            for k in 0..n {
+                self.line(&format!("uint t{t}_{k} = raw{slot}.Load(t{t} + {}u);", 4 * k));
+            }
+            for k in 0..n {
+                self.wv(&Opnd::Vgpr(dst + k as u8), &format!("t{t}_{k}"))?;
+            }
+            return Ok(());
+        }
+        let (slot, is_uav) = match resource.as_ref() {
             Some(Res::Buf(s, u)) => (*s, *u),
             _ => return Err("unresolved buffer".into()),
         };

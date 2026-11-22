@@ -277,7 +277,7 @@ fn pso_metadata_resolves_a_direct_mesh_raw_buffer() {
     use tombox_xshader::psocache::{BindingLayout, UserDataBinding, UserDataKind};
 
     // Copy the direct user register, then read four dwords at byte offset 16.
-    let mut words = vec![sop1(3, 28, 19), 0xf428_000e, 0xfa00_0010];
+    let mut words = vec![sop1(3, 28, 19), 0xf428_000e, 0xfa00_0010, 0xe034_1004, 0x8007_0401];
     words.extend(console_ms(3, 1, 0));
     let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
     shader.resources = [2, 3].map(|space| PsvResource { res_type: 4, lower: 7, upper: 7, space }).to_vec();
@@ -295,6 +295,35 @@ fn pso_metadata_resolves_a_direct_mesh_raw_buffer() {
     assert!(translate_with_image_layouts(&shader, &[layout(2), layout(3)]).is_err());
     let translated = translate_with_image_layouts(&shader, &[layout(2)]).unwrap();
     assert!(translated.hlsl.contains("ByteAddressBuffer raw131079 : register(t7, space2);"));
+    assert_eq!(translated.hlsl.matches("raw131079.Load(").count(), 6);
+    dxc::compile(&translated.hlsl, translated.profile).unwrap();
+}
+
+#[test]
+fn pso_metadata_resolves_mesh_raw_buffer_table_reads() {
+    use tombox_xshader::hlsl::translate_with_image_layouts;
+    use tombox_xshader::meta::PsvResource;
+    use tombox_xshader::psocache::{BindingLayout, UserDataBinding, UserDataKind};
+
+    let mut words = vec![
+        0xf408_0008, 0xfa00_0040, // Load the table descriptor into s0.
+        0xf424_0400, 0xfa00_0010, // Scalar dwordx2 read into s16.
+        0xe034_1004, 0x8000_0401, // Vector dwordx2 read with an explicit byte offset.
+    ];
+    words.extend(console_ms(3, 1, 0));
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    shader.resources.push(PsvResource { res_type: 4, lower: 7, upper: 7, space: 2 });
+    let layout = BindingLayout {
+        metadata_index: 0,
+        entries: vec![UserDataBinding {
+            kind: UserDataKind::ShaderResource,
+            byte_offset: 64,
+            register: 7,
+            raw_fields: [0, 0x2_0804, 0, 0],
+        }],
+    };
+    let translated = translate_with_image_layouts(&shader, &[layout]).unwrap();
+    assert_eq!(translated.hlsl.matches("ByteAddressBuffer raw131079 : register(t7, space2);").count(), 1);
     assert_eq!(translated.hlsl.matches("raw131079.Load(").count(), 4);
     dxc::compile(&translated.hlsl, translated.profile).unwrap();
 }

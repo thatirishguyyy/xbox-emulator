@@ -1,20 +1,27 @@
 //! Resolve MIMG descriptor-table entries using TomBox's PS09 register-space matching.
-use super::Emitter;
+use super::{Emitter, Sym, BINDLESS};
 use crate::psocache::UserDataKind;
 use crate::Stage;
 
 impl Emitter<'_> {
-    pub(super) fn direct_raw_binding(&self, sgpr: u8) -> Option<u32> {
+    pub(super) fn raw_binding(&self, symbol: Option<Sym>) -> Option<u32> {
         if !self.is_ms() || self.ex.root_sig.is_some() || self.image_layouts.is_empty() {
             return None;
         }
+        let (sgpr, offset, kind, dwords) = match symbol {
+            Some(Sym::Table(root)) => (root, 0, UserDataKind::Other(0x100), 2),
+            Some(Sym::Desc { table, off, k: 0 }) if off & BINDLESS == 0 => {
+                (table, off, UserDataKind::ShaderResource, 4)
+            }
+            _ => return None,
+        };
         let mut agreed = None;
         for layout in self.image_layouts {
             let mut entries = layout.entries.iter().filter(|entry| {
                 entry.user_sgpr().checked_add(8) == Some(sgpr)
-                    && entry.byte_offset == 0
-                    && entry.kind == UserDataKind::Other(0x100)
-                    && entry.descriptor_dwords() == 2
+                    && entry.byte_offset == offset
+                    && entry.kind == kind
+                    && entry.descriptor_dwords() == dwords
             });
             let entry = entries.next()?;
             if entries.next().is_some()
