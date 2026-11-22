@@ -338,6 +338,7 @@ struct Emitter<'a> {
     /// Structured buffers read with scalar loads (`s_buffer_load` through an SRV/UAV
     /// descriptor): they need the byte-offset helper.
     sbuf_flat: BTreeSet<(bool, u32)>,
+    mesh_sbuf_words: BTreeMap<u32, u32>,
     is_cs: bool,
     /// Nesting depth of emitted HLSL loops at the current instruction.
     loop_depth: u32,
@@ -966,6 +967,7 @@ fn translate_with(ex: &ShaderExtract, image_layouts: &[crate::psocache::BindingL
         epilog_exp: HashMap::new(),
         cur_idx: 0,
         sbuf_flat: BTreeSet::new(),
+        mesh_sbuf_words: BTreeMap::new(),
         is_cs: matches!(ex.stage, Stage::Compute | Stage::Mesh | Stage::Amplification),
         is_gs: ex.stage == Stage::Geometry,
         uses_lds: false,
@@ -1317,6 +1319,7 @@ impl<'a> Emitter<'a> {
             self.samp_cmp.clone(),
             self.uav.clone(),
             self.sbuf.clone(),
+            self.mesh_sbuf_words.clone(),
             self.tbuf.clone(),
             self.tbuf_uint.clone(),
         );
@@ -1388,7 +1391,7 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        (self.res, self.cb_size, self.tex, self.samp, self.samp_cmp, self.uav, self.sbuf, self.tbuf, self.tbuf_uint) = saved;
+        (self.res, self.cb_size, self.tex, self.samp, self.samp_cmp, self.uav, self.sbuf, self.mesh_sbuf_words, self.tbuf, self.tbuf_uint) = saved;
 
         // TB_DFDEBUG=<sgpr>: print that register's symbol at every block entry (diagnostics).
         if let Some(reg) = std::env::var("TB_DFDEBUG").ok().and_then(|v| v.parse::<u16>().ok()) {
@@ -1703,6 +1706,11 @@ impl<'a> Emitter<'a> {
     /// data it uploads); no 16-byte buffer in the comparison was touched like that.
     /// A heuristic (TECHNICAL_DEBT).
     fn sbuf_words(&self, key: (bool, u32)) -> u32 {
+        if !key.0 {
+            if let Some(&words) = self.mesh_sbuf_words.get(&key.1) {
+                return words;
+            }
+        }
         let raw = self.sbuf.get(&key).copied().unwrap_or(1).max(1);
         match raw {
             1 => 1,
@@ -2038,6 +2046,16 @@ impl<'a> Emitter<'a> {
                     let buffer_kind = if cands.len() == 1 { self.kind_at(cands[0].0, cands[0].1, false)?.filter(|k| *k <= 1) } else { None };
                     for (table, off) in &cands {
                         let constant_slot = self.constant_binding(*table, *off);
+                        if let Some((slot, words)) = self.structured_binding(*table, *off) {
+                            if self.mesh_sbuf_words.insert(slot, words).is_some_and(|old| old != words) {
+                                return Err(format!("PSO: conflicting structured buffer strides for slot {slot}"));
+                            }
+                            let key = (false, slot);
+                            self.sbuf.entry(key).or_insert(0);
+                            self.sbuf_flat.insert(key);
+                            out.push((((*table as u32) << 24) | off, Res::Buf(slot, false)));
+                            continue;
+                        }
                         let slot = constant_slot.unwrap_or_else(|| self.bind_id(*table, *off, 32));
                         if let Some(k) = buffer_kind.filter(|_| constant_slot.is_none()) {
                             let key = (k == 1, slot);

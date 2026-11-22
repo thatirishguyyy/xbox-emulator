@@ -12,16 +12,20 @@ impl Emitter<'_> {
             }
             _ => return None,
         };
-        self.mesh_buffer_binding(sgpr, offset, kind, dwords, 4)
+        self.mesh_buffer_binding(sgpr, offset, kind, dwords, 4).map(|(slot, _)| slot)
     }
 
     pub(super) fn constant_binding(&self, table: u8, offset: u32) -> Option<u32> {
-        self.mesh_buffer_binding(table, offset, UserDataKind::ConstantBuffer, 4, 2)
+        self.mesh_buffer_binding(table, offset, UserDataKind::ConstantBuffer, 4, 2).map(|(slot, _)| slot)
+    }
+
+    pub(super) fn structured_binding(&self, table: u8, offset: u32) -> Option<(u32, u32)> {
+        self.mesh_buffer_binding(table, offset, UserDataKind::ShaderResource, 4, 5)
     }
 
     fn mesh_buffer_binding(
         &self, sgpr: u8, offset: u32, kind: UserDataKind, dwords: u8, resource_type: u32,
-    ) -> Option<u32> {
+    ) -> Option<(u32, u32)> {
         if !self.is_ms() || self.ex.root_sig.is_some() || offset & BINDLESS != 0 {
             return None;
         }
@@ -46,7 +50,18 @@ impl Emitter<'_> {
                 return None;
             }
             let slot = (entry.register_space() << 16) | entry.register;
-            if agreed.replace(slot).is_some_and(|previous| previous != slot) {
+            // For structured SRVs, the first PS09 field appears to carry the byte stride.
+            let stride = if resource_type == 5 {
+                let bytes = entry.raw_fields[0];
+                if !(4..=2048).contains(&bytes) || bytes % 4 != 0 {
+                    return None;
+                }
+                bytes / 4
+            } else {
+                0
+            };
+            let binding = (slot, stride);
+            if agreed.replace(binding).is_some_and(|previous| previous != binding) {
                 return None;
             }
         }
