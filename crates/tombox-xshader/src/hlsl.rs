@@ -996,13 +996,6 @@ pub fn translate(ex: &ShaderExtract) -> Result<Translated, String> {
 }
 
 pub fn translate_linked(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> Result<Translated, String> {
-    if ex.root_sig.is_none() && std::env::var_os("TOMBOX_INFER_ROOT_SIG").is_some() {
-        if let Ok(sig) = infer::infer_root_signature(ex) {
-            let mut inferred = ex.clone();
-            inferred.root_sig = Some(sig);
-            return translate_linked(&inferred, feeds_ps);
-        }
-    }
     let out_interp = match ex.stage {
         Stage::Vertex | Stage::Geometry | Stage::Mesh => feeds_ps.cloned().unwrap_or_default(),
         _ => InputInterp::default(),

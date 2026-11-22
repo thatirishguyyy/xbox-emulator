@@ -174,10 +174,6 @@ fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &Input
     })?;
     if let Some(root) = root.filter(|_| !ex.has_root_sig) {
         ex.root_sig = Some(tombox_xshader::parse_root_signature(root).map_err(|e| format!("pipeline root signature: {e}"))?);
-    } else if ex.root_sig.is_none() && !ex.has_root_sig && matches!(ex.stage, tombox_xshader::Stage::Mesh | tombox_xshader::Stage::Amplification) {
-        if let Ok(rs) = tombox_xshader::infer_root_signature(&ex) {
-            ex.root_sig = Some(rs);
-        }
     }
     let mut t = tombox_xshader::hlsl::translate_linked(&ex, Some(link)).map_err(|e| {
         dump_failure(hash, blob, None, &e);

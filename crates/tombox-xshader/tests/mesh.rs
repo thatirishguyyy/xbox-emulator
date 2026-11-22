@@ -329,9 +329,14 @@ fn mesh_typed_buffer_load_uses_root_table_range() {
 
 #[test]
 fn mesh_root_signature_inference_binds_scalar_buffer_load() {
+    use tombox_xshader::meta::PsvResource;
+
     let mut words = vec![sop1(3, 0, 16), sop1(3, 28, 0), 0xf420_000e, 0xfa00_0000];
     words.extend(console_ms(3, 1, 0));
     let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    let err = tombox_xshader::infer_root_signature(&shader).unwrap_err();
+    assert_eq!(err, "root signature inference: root descriptor s16: no PSV0 resource record matches range type 2");
+    shader.resources.push(PsvResource { res_type: 2, space: 1, lower: 4, upper: 4, kind: 0 });
     assert!(translate(&shader).is_err());
     let sig = tombox_xshader::infer_root_signature(&shader).expect("inferred root signature");
     assert_eq!(sig.params.len(), 1);
@@ -346,9 +351,15 @@ fn mesh_root_signature_inference_binds_scalar_buffer_load() {
 
 #[test]
 fn mesh_root_signature_inference_binds_typed_buffer_table() {
+    use tombox_xshader::meta::PsvResource;
+
     let mut words = vec![0xf408_0008, 0xfa00_0020, 0xe000_2000, 0x8000_0101];
     words.extend(console_ms(3, 1, 0));
-    let shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    shader.resources.push(PsvResource { res_type: 2, space: 1, lower: 4, upper: 4, kind: 0 });
+    let err = tombox_xshader::translate_with_inference(&shader).err().unwrap();
+    assert_eq!(err, "root signature inference: table s16 slot 1: no PSV0 resource record matches range type 0");
+    shader.resources.push(PsvResource { res_type: 3, space: 4, lower: 9, upper: 9, kind: 0 });
     assert!(translate(&shader).is_err());
     let sig = tombox_xshader::infer_root_signature(&shader).expect("inferred root signature");
     assert_eq!(sig.params.len(), 1);

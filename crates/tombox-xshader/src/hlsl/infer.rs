@@ -26,7 +26,7 @@ fn determine_user_base(ex: &ShaderExtract, insns: &[Insn]) -> usize {
     }
 }
 
-fn match_resource(resources: &[PsvResource], used: &mut BTreeSet<usize>, range_type: u32, default_reg: u32) -> Result<(u32, u32), String> {
+fn match_resource(resources: &[PsvResource], used: &mut BTreeSet<usize>, range_type: u32) -> Result<(u32, u32), String> {
     let mut candidates = resources.iter().enumerate().filter(|(i, res)| {
         !used.contains(i) && match range_type {
             0 => (3..=5).contains(&res.res_type),
@@ -37,7 +37,7 @@ fn match_resource(resources: &[PsvResource], used: &mut BTreeSet<usize>, range_t
         }
     });
     let Some((index, resource)) = candidates.next() else {
-        return Ok((default_reg, 0));
+        return Err(format!("no PSV0 resource record matches range type {range_type}"));
     };
     if candidates.next().is_some() {
         return Err(format!("multiple PSV0 resource records match range type {range_type}"));
@@ -46,13 +46,13 @@ fn match_resource(resources: &[PsvResource], used: &mut BTreeSet<usize>, range_t
     Ok((resource.lower, resource.space))
 }
 
-fn match_descriptor(resources: &[PsvResource], used: &mut BTreeSet<usize>, kind: u32, default_reg: u32) -> Result<(u32, u32), String> {
+fn match_descriptor(resources: &[PsvResource], used: &mut BTreeSet<usize>, kind: u32) -> Result<(u32, u32), String> {
     let range_type = match kind {
         2 => 2,
         3 => 0,
         _ => 1,
     };
-    match_resource(resources, used, range_type, default_reg)
+    match_resource(resources, used, range_type)
 }
 
 pub fn infer_root_signature(ex: &ShaderExtract) -> Result<RootSig, String> {
@@ -193,8 +193,7 @@ pub fn infer_root_signature(ex: &ShaderExtract) -> Result<RootSig, String> {
     let mut s = base as u8;
     while s <= max_sgpr {
         if let Some(&kind) = root_descs.get(&s) {
-            let default_reg = (s as u32).saturating_sub(base as u32);
-            let (reg, space) = match_descriptor(&ex.resources, &mut used_res, kind, default_reg)
+            let (reg, space) = match_descriptor(&ex.resources, &mut used_res, kind)
                 .map_err(|err| format!("root signature inference: root descriptor s{s}: {err}"))?;
             params.push(RootParam {
                 visibility: 0,
@@ -211,7 +210,7 @@ pub fn infer_root_signature(ex: &ShaderExtract) -> Result<RootSig, String> {
             }
             let mut ranges = Vec::with_capacity(ranges_set.len());
             for (off_table, range_type) in slots {
-                let (reg, space) = match_resource(&ex.resources, &mut used_res, range_type, off_table)
+                let (reg, space) = match_resource(&ex.resources, &mut used_res, range_type)
                     .map_err(|err| format!("root signature inference: table s{s} slot {off_table}: {err}"))?;
                 ranges.push(RootRange {
                     range_type,
