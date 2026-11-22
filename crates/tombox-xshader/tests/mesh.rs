@@ -271,6 +271,35 @@ fn pso_metadata_resolves_a_mesh_typed_buffer_load() {
 }
 
 #[test]
+fn pso_metadata_resolves_a_direct_mesh_raw_buffer() {
+    use tombox_xshader::hlsl::translate_with_image_layouts;
+    use tombox_xshader::meta::PsvResource;
+    use tombox_xshader::psocache::{BindingLayout, UserDataBinding, UserDataKind};
+
+    // Copy the direct user register, then read four dwords at byte offset 16.
+    let mut words = vec![sop1(3, 28, 19), 0xf428_000e, 0xfa00_0010];
+    words.extend(console_ms(3, 1, 0));
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    shader.resources = [2, 3].map(|space| PsvResource { res_type: 4, lower: 7, upper: 7, space }).to_vec();
+    let layout = |space: u32| BindingLayout {
+        metadata_index: 0,
+        entries: vec![UserDataBinding {
+            kind: UserDataKind::Other(0x100),
+            byte_offset: 0,
+            register: 7,
+            raw_fields: [0, (space << 16) | 0xb02, 0, 0],
+        }],
+    };
+    assert!(translate(&shader).is_err());
+    assert!(translate_with_image_layouts(&shader, &[layout(1)]).is_err());
+    assert!(translate_with_image_layouts(&shader, &[layout(2), layout(3)]).is_err());
+    let translated = translate_with_image_layouts(&shader, &[layout(2)]).unwrap();
+    assert!(translated.hlsl.contains("ByteAddressBuffer raw131079 : register(t7, space2);"));
+    assert_eq!(translated.hlsl.matches("raw131079.Load(").count(), 4);
+    dxc::compile(&translated.hlsl, translated.profile).unwrap();
+}
+
+#[test]
 fn mesh_refusals_are_explicit() {
     let base = console_ms(3, 1, 0);
     let mut mi = mesh_info(128, 128, 128, 2);

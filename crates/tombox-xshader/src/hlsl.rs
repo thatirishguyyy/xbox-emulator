@@ -78,6 +78,7 @@ enum Res {
     Samp(u32),
     Uav(u32, u32), // slot, dim
     Buf(u32, bool), // slot, is_uav (structured buffer)
+    RawSrv(u32),    // directly bound raw buffer, addressed in bytes
     TBuf(u32, bool), // slot, is_uav (typed buffer)
     CbDyn(u32),      // constant buffer read through MUBUF (per-lane offset)
     CodeTbl,         // s_load from the code section (embedded constant table)
@@ -2012,6 +2013,16 @@ impl<'a> Emitter<'a> {
                     // CBV descriptors sit on a 32-byte stride (cb1 is loaded from table offset
                     // 0x20 in MainOnePassPointLightPS).
                     let bsym = sym.get(&b).copied().or_else(|| (!written.contains(&b)).then_some(Sym::Table(b as u8)));
+                    if let Some(Sym::Table(root)) = bsym {
+                        if let Some(slot) = self.direct_raw_binding(root) {
+                            self.res.insert(idx, vec![Res::RawSrv(slot)]);
+                            for k in 0..n {
+                                sym.remove(&(d + k as u16));
+                                written.insert(d + k as u16);
+                            }
+                            continue;
+                        }
+                    }
                     let cands = self.desc_candidates(bsym.as_ref(), 32).ok_or_else(|| {
                         format!("s_buffer_load at {:#x}: base s{b} is not a buffer descriptor ({:?})", ins.offset, sym.get(&b))
                     })?;
@@ -3460,6 +3471,18 @@ impl<'a> Emitter<'a> {
                 }
                 let slot = match self.res.get(&idx).and_then(|v| v.first()).copied() {
                     Some(Res::Cb(s)) => s,
+                    Some(Res::RawSrv(slot)) => {
+                        let dynamic = if soff != 0x7d { format!(" + {}", ssrc_name(soff)?) } else { String::new() };
+                        let t = self.tmp;
+                        self.tmp += 1;
+                        self.line(&format!("uint t{t} = {:#x}u{dynamic};", ins.aux.imm as u32));
+                        for k in 0..n {
+                            let dst = sreg_opnd(base + k as u8);
+                            self.touch(&dst);
+                            self.ws(&dst, &format!("raw{slot}.Load(t{t} + {}u)", 4 * k))?;
+                        }
+                        return Ok(());
+                    }
                     Some(Res::Buf(slot, is_uav)) => {
                         // Structured buffer read by byte offset (see `tb_sbw_*`).
                         let nm = if is_uav { "ubuf" } else { "sbuf" };
@@ -6130,6 +6153,13 @@ impl<'a> Emitter<'a> {
                 return Err(format!("sampler s{slot} used both as a regular and a comparison sampler"));
             }
             h.push_str(&self.decl(&mut used, "SamplerComparisonState", &format!("scmp{slot}"), *slot, 's', 3, 16)?);
+        }
+        let raw_slots: BTreeSet<_> = self.res.values().flatten().filter_map(|res| {
+            if let Res::RawSrv(slot) = res { Some(*slot) } else { None }
+        }).collect();
+        for slot in raw_slots {
+            let reg = Self::reg_of('t', slot);
+            let _ = writeln!(h, "ByteAddressBuffer raw{slot} : register({reg});");
         }
         for (is_uav, slot) in self.sbuf.keys() {
             let (ty, nm, reg) = if *is_uav { ("RWStructuredBuffer", "ubuf", 'u') } else { ("StructuredBuffer", "sbuf", 't') };
