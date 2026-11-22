@@ -17,9 +17,15 @@ fn main() -> ExitCode {
     let mut fssm_out = None;
     let mut hlsl_out = None;
     let mut root_signature = None;
+    let mut infer_root = false;
     let mut i = 2;
     while i < args.len() {
         let flag = args[i].as_str();
+        if flag == "--infer-root-signature" || flag == "--infer-root" {
+            infer_root = true;
+            i += 1;
+            continue;
+        }
         let output = match flag {
             "--isa-out" => &mut isa_out,
             "--fssm-out" => &mut fssm_out,
@@ -63,6 +69,11 @@ fn main() -> ExitCode {
                 eprintln!("cannot load root signature {path}: {e}");
                 return ExitCode::FAILURE;
             }
+        }
+    }
+    if infer_root && ex.root_sig.is_none() {
+        if let Ok(signature) = tombox_xshader::infer_root_signature(&ex) {
+            ex.root_sig = Some(signature);
         }
     }
 

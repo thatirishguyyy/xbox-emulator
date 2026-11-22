@@ -327,6 +327,69 @@ fn mesh_typed_buffer_load_uses_root_table_range() {
 }
 
 #[test]
+fn mesh_root_signature_inference_binds_scalar_buffer_load() {
+    let mut words = vec![sop1(3, 0, 16), sop1(3, 28, 0), 0xf420_000e, 0xfa00_0000];
+    words.extend(console_ms(3, 1, 0));
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    assert!(translate(&shader).is_err());
+    let sig = tombox_xshader::infer_root_signature(&shader).expect("inferred root signature");
+    assert_eq!(sig.params.len(), 1);
+    match &sig.params[0].kind {
+        tombox_xshader::meta::RootParamKind::Descriptor { kind, .. } => assert_eq!(*kind, 2),
+        other => panic!("expected root descriptor, got {other:?}"),
+    }
+    shader.root_sig = Some(sig);
+    let translated = translate(&shader).expect("translated with inferred root signature");
+    assert!(translated.hlsl.contains("cbuffer CB"), "{}", translated.hlsl);
+}
+
+#[test]
+fn mesh_root_signature_inference_binds_typed_buffer_table() {
+    let mut words = vec![0xf408_0008, 0xfa00_0020, 0xe000_2000, 0x8000_0101];
+    words.extend(console_ms(3, 1, 0));
+    let shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    assert!(translate(&shader).is_err());
+    let sig = tombox_xshader::infer_root_signature(&shader).expect("inferred root signature");
+    assert_eq!(sig.params.len(), 1);
+    match &sig.params[0].kind {
+        tombox_xshader::meta::RootParamKind::Table(ranges) => {
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(ranges[0].range_type, 0);
+            assert_eq!(ranges[0].offset_in_table, 1);
+        }
+        other => panic!("expected descriptor table, got {other:?}"),
+    }
+    let translated = tombox_xshader::translate_with_inference(&shader).expect("translated with inference");
+    assert!(translated.hlsl.contains("Buffer<"), "{}", translated.hlsl);
+}
+
+#[test]
+fn mesh_root_signature_inference_matches_psv_metadata() {
+    use tombox_xshader::meta::PsvResource;
+
+    let mut words = vec![0xf408_0008, 0xfa00_0020, 0xe000_2000, 0x8000_0101];
+    words.extend(console_ms(3, 1, 0));
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    shader.resources = vec![PsvResource {
+        res_type: 3,
+        space: 4,
+        lower: 9,
+        upper: 9,
+        kind: 0,
+    }];
+    let sig = tombox_xshader::infer_root_signature(&shader).expect("inferred root signature");
+    match &sig.params[0].kind {
+        tombox_xshader::meta::RootParamKind::Table(ranges) => {
+            assert_eq!(ranges[0].base_register, 9);
+            assert_eq!(ranges[0].space, 4);
+        }
+        other => panic!("expected descriptor table, got {other:?}"),
+    }
+    let translated = tombox_xshader::translate_with_inference(&shader).expect("translated with inference");
+    assert!(translated.hlsl.contains("register(t9, space4)"), "{}", translated.hlsl);
+}
+
+#[test]
 fn mesh_refusals_are_explicit() {
     let base = console_ms(3, 1, 0);
     let mut mi = mesh_info(128, 128, 128, 2);

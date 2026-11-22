@@ -33,6 +33,7 @@ mod centroid;
 mod durango;
 mod mixed;
 mod mimg_d16;
+pub mod infer;
 use mimg_d16::{mimg_data_regs, Lane};
 
 pub struct Translated {
@@ -993,6 +994,13 @@ pub fn translate(ex: &ShaderExtract) -> Result<Translated, String> {
 }
 
 pub fn translate_linked(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> Result<Translated, String> {
+    if ex.root_sig.is_none() && std::env::var_os("TOMBOX_INFER_ROOT_SIG").is_some() {
+        if let Ok(sig) = infer::infer_root_signature(ex) {
+            let mut inferred = ex.clone();
+            inferred.root_sig = Some(sig);
+            return translate_linked(&inferred, feeds_ps);
+        }
+    }
     let out_interp = match ex.stage {
         Stage::Vertex | Stage::Geometry | Stage::Mesh => feeds_ps.cloned().unwrap_or_default(),
         _ => InputInterp::default(),
@@ -1001,6 +1009,17 @@ pub fn translate_linked(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> R
         Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, &out_interp, Some(8), BTreeSet::new()).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
         r => r,
     }
+}
+
+pub fn translate_with_inference(ex: &ShaderExtract) -> Result<Translated, String> {
+    if ex.root_sig.is_some() || ex.has_root_sig {
+        return translate(ex);
+    }
+    let mut inferred = ex.clone();
+    if let Ok(sig) = infer::infer_root_signature(ex) {
+        inferred.root_sig = Some(sig);
+    }
+    translate(&inferred)
 }
 
 fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_override: Option<usize>, uav_force: BTreeSet<u32>) -> Result<Translated, String> {

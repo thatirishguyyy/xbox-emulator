@@ -97,7 +97,11 @@ fn prepare(it: &Item, loop_grad: bool, fma: shader_cache::Fma) -> Prep {
         };
         let st = stage_name(&ex.stage);
         if !ex.has_root_sig && root.is_none() && matches!(ex.stage, Stage::Mesh | Stage::Amplification) {
-            return Prep::RuntimeOnly { st, reason: "mesh/amplification shader without a dumped PSO root signature" };
+            if let Ok(rs) = tombox_xshader::infer_root_signature(&ex) {
+                ex.root_sig = Some(rs);
+            } else {
+                return Prep::RuntimeOnly { st, reason: "mesh/amplification shader without a dumped PSO root signature" };
+            }
         }
         if let Some(root) = root.as_ref().filter(|_| !ex.has_root_sig) {
             match parse_root_signature(root) {

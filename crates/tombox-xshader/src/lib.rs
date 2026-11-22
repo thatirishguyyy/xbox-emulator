@@ -125,6 +125,9 @@ pub fn parse_root_signature(data: &[u8]) -> Result<meta::RootSig, String> {
     meta::parse_rts0(body)
 }
 
+pub use hlsl::infer::infer_root_signature;
+pub use hlsl::translate_with_inference;
+
 /// Program type from the DXIL program header (D3D12_SHADER_VERSION_TYPE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {

@@ -450,6 +450,8 @@ name = "pixrt10"
 version = "0.1.0"
 dependencies = [
  "compat-common",
+ "console-sandbox",
+ "xbtp",
  "xone-exports",
 ]
 
