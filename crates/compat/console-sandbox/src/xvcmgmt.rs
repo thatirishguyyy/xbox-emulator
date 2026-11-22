@@ -676,11 +676,19 @@ extern "system" {
 }
 
 pub unsafe extern "system" fn close_handle(h: usize) -> i32 {
+    crate::logan::forget(h);
+    crate::vab::forget(h);
     before_close(h);
     CloseHandle(h)
 }
 
 pub unsafe extern "system" fn device_io_control(h: usize, code: u32, inb: *const u8, inl: u32, outb: *mut u8, outl: u32, ret: *mut u32, ov: *mut c_void) -> i32 {
+    if crate::logan::is_device(h) {
+        return crate::logan::ioctl(code, inb as *mut u8, inl, outb, outl, ret);
+    }
+    if crate::vab::is_device(h) {
+        return crate::vab::ioctl(code, inb, inl, ret);
+    }
     let Some(file) = device_of(h) else {
         return DeviceIoControl(h, code, inb, inl, outb, outl, ret, ov);
     };

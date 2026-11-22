@@ -375,6 +375,7 @@ pub fn apply(real_list: *mut c_void) {
             crate::cmdlist_x::install(&XBOX_VT, real_vt);
             crate::query_x::install(&XBOX_VT, real_vt);
             crate::bindtrace::install_root_cbv_hooks(&XBOX_VT, real_vt);
+            crate::cbv_raw::install_root_cbv_hooks(&XBOX_VT, real_vt);
             crate::replay::install(&XBOX_VT);
             crate::replay_ext::install(&XBOX_VT);
             crate::hot_reload::install(&XBOX_VT);
@@ -391,6 +392,8 @@ pub fn apply(real_list: *mut c_void) {
             crate::cl_console_fix::install_copy_memory(&XBOX_VT);
             crate::dbcount::install(&XBOX_VT);
             crate::cl_console_fix::install_family_tail(&XBOX_VT);
+            crate::resolve_x::install(&XBOX_VT);
+            crate::pso_async::install(&XBOX_VT);
             XBOX_VT[CONSOLE_NULL_SLOT].store(0, Ordering::Relaxed);
             record("d3d12_xs", "cmdlist.vtable",
                 &format!("built Xbox-layout cmdlist vtable from real {real_vt:p} (+4 shift at PC28)"));

@@ -3,7 +3,7 @@ name = "d3d12_xs"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for Xbox d3d12_xs.dll — logging stubs + correct IID_ID3D12Device data export."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "d3d12_xs"

@@ -23,6 +23,7 @@ pub(crate) struct Dcc {
     pub(crate) s: [[u8; 256]; 3],
     pub(crate) sc: [u8; 64],
     pub(crate) msg: Vec<String>,
+    pub(crate) spill: Vec<(u32, u8)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +64,7 @@ impl Dcc {
     }
 
     pub(crate) fn new() -> Dcc {
-        let mut d = Dcc { o: [0; 0x420], s: [[0; 256]; 3], sc: [0; 64], msg: Vec::new() };
+        let mut d = Dcc { o: [0; 0x420], s: [[0; 256]; 3], sc: [0; 64], msg: Vec::new(), spill: Vec::new() };
         d.p(0x00, 1);
         d.p(0x04, 4);
         d.p(0x08, 4);

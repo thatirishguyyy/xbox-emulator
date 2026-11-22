@@ -6,6 +6,8 @@ pub mod console;
 pub mod launch;
 pub mod server;
 pub mod client;
+pub mod title;
+pub mod variant;
 
 #[cfg(test)]
 mod tests;
@@ -35,5 +37,9 @@ pub static SITE: EntrySite = EntrySite {
 
 #[no_mangle]
 pub unsafe extern "system" fn XtfOrdinal_4(extension: *const GUID, iid: *const GUID, ppv: *mut Obj) -> HRESULT {
-    extension_entry_point(&SITE, &REMOTE_RUN_EXTENSION_ID, extension, iid, ppv)
+    let hr = extension_entry_point(&SITE, &REMOTE_RUN_EXTENSION_ID, extension, iid, ppv);
+    if hr >= 0 {
+        title::ensure();
+    }
+    hr
 }

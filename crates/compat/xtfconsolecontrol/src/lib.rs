@@ -7,9 +7,12 @@ pub mod privilege;
 pub mod system;
 pub mod process;
 pub mod screenshot;
+pub mod client;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod client_tests;
 
 use xtfmsg::com::metadata::OperationFn;
 use xtfmsg::com::{metadata, Com, Obj, IID_XBTP_EXTENSION_METADATA};

@@ -25,6 +25,40 @@ fn is_core_host(h: &str) -> bool {
     h == "nadeo.online" || h.ends_with(".nadeo.online")
 }
 
+pub const NADEO_PARAMETER_GROUP: &str = "NadeoServicesParameters";
+pub const MASTERSERVER_INIT_URL: &str = "https://prod.trackmania.core.nadeo.online/";
+
+pub fn nadeo_parameter_group() -> Value {
+    serde_json::json!({ "fields": { "masterserver_init_url": MASTERSERVER_INIT_URL }, "relatedPopulation": Value::Null })
+}
+
+fn wants_group(req: &Request, group: &str) -> bool {
+    match req.query("parameterGroups").filter(|w| !w.trim().is_empty()) {
+        None => true,
+        Some(w) => w.split(',').any(|n| n.trim().eq_ignore_ascii_case(group)),
+    }
+}
+
+fn is_parameters_path(req: &Request) -> bool {
+    let seg = req.segments();
+    let seg: Vec<&str> = if seg.first().map_or(false, |v| v.len() >= 2 && v.starts_with('v') && v[1..].bytes().all(|b| b.is_ascii_digit())) { seg[1..].to_vec() } else { seg };
+    req.method == "GET" && seg.len() == 3 && matches!(seg[0], "spaces" | "applications") && seg[2].eq_ignore_ascii_case("parameters")
+}
+
+pub fn with_nadeo_parameters(req: &Request, r: Response) -> Response {
+    if r.status != 200 || !is_parameters_path(req) || !wants_group(req, NADEO_PARAMETER_GROUP) {
+        return r;
+    }
+    let Ok(mut v) = serde_json::from_slice::<Value>(&r.body) else { return r };
+    let Some(p) = v.get_mut("parameters").and_then(Value::as_object_mut) else { return r };
+    if p.contains_key(NADEO_PARAMETER_GROUP) {
+        return r;
+    }
+    p.insert(NADEO_PARAMETER_GROUP.into(), nadeo_parameter_group());
+    crate::record_raw("online", "trackmania", &format!("{} served with masterserver_init_url={MASTERSERVER_INIT_URL}", NADEO_PARAMETER_GROUP));
+    Response::json(&v)
+}
+
 pub struct Trackmania {
     pub ubi: XDefiant,
     pub core: core::Core,
@@ -92,7 +126,8 @@ impl TitleService for Trackmania {
         if is_nadeo_host(&host) {
             return self.nadeo(req, &host);
         }
-        self.ubi.route(req)
+        let r = self.ubi.route(req)?;
+        Some(with_nadeo_parameters(req, r))
     }
 
     fn not_found(&self, req: &Request) -> Response {

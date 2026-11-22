@@ -14,6 +14,9 @@ fn sgpr(o: Option<&Opnd>) -> Option<u8> {
 
 impl Emitter<'_> {
     pub(super) fn rootmem(&self) -> bool {
+        if self.dg().is_some() {
+            return self.dg_has_mem();
+        }
         if let Some(v) = self.rm_mode.get() {
             return v;
         }
@@ -56,10 +59,16 @@ impl Emitter<'_> {
     }
 
     pub(super) fn rm_ptr(&self, table: u8) -> bool {
+        if self.dg().is_some() {
+            return table == 0 && self.dg_has_mem();
+        }
         (table as usize) < self.user_base() && self.rootmem()
     }
 
     fn rm_param(&self, dword: u32) -> Option<(usize, u32)> {
+        if self.dg().is_some() {
+            return self.dg_mem(dword);
+        }
         let mut at = dword;
         for (i, p) in self.ex.root_sig.as_ref()?.params.iter().enumerate() {
             let n = match &p.kind {
@@ -99,6 +108,7 @@ impl Emitter<'_> {
             return None;
         }
         Some(match self.rm_kind_of((table & !RM_TABLE) as usize) {
+            Some(RootParamKind::Table(_)) => return None,
             Some(RootParamKind::Descriptor { kind: 2, .. }) => Some(2),
             Some(RootParamKind::Descriptor { kind: 3, .. }) => Some(0),
             Some(RootParamKind::Descriptor { kind: 4, .. }) => Some(1),
@@ -112,6 +122,7 @@ impl Emitter<'_> {
         }
         match self.rm_kind_of((table & !RM_TABLE) as usize) {
             Some(RootParamKind::Descriptor { register, space, .. }) => Some((space << 16) | register),
+            Some(RootParamKind::Table(_)) => None,
             _ => Some(u32::MAX),
         }
     }
@@ -166,6 +177,9 @@ impl Emitter<'_> {
     }
 
     pub(super) fn cs_tgid_base(&self, nparams: usize) -> usize {
+        if let Some(e) = self.dg_sgpr_end() {
+            return if self.dg_has_mem() { super::durango::SGPR_END as usize } else { e };
+        }
         if self.rootmem() {
             4
         } else {

@@ -3,7 +3,7 @@ name = "timebrokerserver"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console TimeBrokerServer.dll: ServiceMain and SvchostPushServiceGlobalsEx forward to the PC time broker staged as timebrokerserver_sys.dll; the console SvchostPushServiceGlobals (legacy SVCHOST_GLOBAL_DATA) is adapted into the PC Ex block."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

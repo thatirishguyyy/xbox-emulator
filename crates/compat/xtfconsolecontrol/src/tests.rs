@@ -18,7 +18,7 @@ fn root() -> PathBuf {
     std::env::temp_dir().join(format!("xtfconsolecontrol-test-{}", std::process::id()))
 }
 
-fn guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn guard() -> std::sync::MutexGuard<'static, ()> {
     INIT.call_once(|| {
         let r = root();
         let _ = std::fs::remove_dir_all(&r);
@@ -551,7 +551,7 @@ fn wtoi_and_dump_names_follow_crt_and_strsafe() {
     assert_eq!(dump_file_name(Some(&"a".repeat(300)), (1, 1, 1, 1, 1), "mini"), Err(STRSAFE_E_INSUFFICIENT_BUFFER));
 }
 
-fn dump_dir() -> PathBuf {
+pub(crate) fn dump_dir() -> PathBuf {
     console_sandbox::fs::drive_dir('D')
 }
 

@@ -3,7 +3,7 @@ name = "xtfmsg"
 version = "0.1.0"
 edition = "2021"
 description = "Shared statically-linked layer of the console Xbox Tools Framework extension DLLs: xtfmessaging JSON/message helpers, XtfOperationErrorContext, the XtfCHK and activity TraceLogging events, and late-bound xbtp.dll imports."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xtfmsg"
@@ -11,3 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 xtfcommon = { path = "../xtfcommon" }
+
+[dev-dependencies]
+xbtp = { path = "../xbtp" }

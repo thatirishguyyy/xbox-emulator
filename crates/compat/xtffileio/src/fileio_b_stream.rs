@@ -315,7 +315,7 @@ unsafe fn write_operation_error(response: *mut c_void, code: HRESULT, errors: &[
     if hr < 0 {
         return hr;
     }
-    serialize_object(body.0, response)
+    serialize_response_object(body.0, response)
 }
 
 pub unsafe fn stream_operation_handler(session: Session, request: *mut c_void, response: *mut c_void) -> HRESULT {

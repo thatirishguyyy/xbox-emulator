@@ -145,6 +145,7 @@ unsafe fn create(factory: *mut c_void, out: &mut *mut c_void) -> i32 {
 }
 
 const IID_DISPLAY_MODE: Guid = Guid { data1: 0x9E345409, data2: 0x2CF2, data3: 0x4DD1, data4: [0x8F, 0xCA, 0x2F, 0x96, 0xCE, 0x75, 0x81, 0xC0] };
+const IID_SIPC_PROXY_CONTROL: Guid = Guid { data1: 0x9A57863E, data2: 0xB229, data3: 0x4696, data4: [0xA8, 0xD4, 0x40, 0xE5, 0xEB, 0x79, 0x2D, 0x0F] };
 const IID_APP_MQ: Guid = Guid { data1: 0xAF7F45CF, data2: 0x0C68, data3: 0x46DE, data4: [0xAF, 0xED, 0x25, 0x2B, 0xBF, 0xF0, 0xC9, 0xC4] };
 
 unsafe fn query(obj: *mut c_void, iid: &Guid) -> Option<*mut c_void> {
@@ -153,8 +154,39 @@ unsafe fn query(obj: *mut c_void, iid: &Guid) -> Option<*mut c_void> {
     (hr == S_OK && !out.is_null()).then_some(out)
 }
 
-unsafe fn host_requests(obj: *mut c_void, conn: u64) -> Vec<u32> {
+unsafe fn dcom_proxy_app(app: *mut c_void) {
+    let id = Guid { data1: 0x1111_2222, data2: 3, data3: 4, data4: [5, 6, 7, 8, 9, 10, 11, 12] };
+    let mut out = 0xDEAD_BEEFu32;
+    let hr = vcall::<unsafe extern "system" fn(*mut c_void, *const Guid, u8, u8, u16, u64, *mut u32) -> i32>(app, 3)(app, &id, 1, 2, 3, 4, &mut out);
+    assert_eq!(hr, S_OK, "ISIPCProxyControl2 slot 3 completes through the emulated host IGameCoreApiService broker");
+    assert_eq!(out, console_sandbox::gcdcom::result_value());
+    assert_eq!(console_sandbox::gcdcom::live_refs(), (0, 0), "the client releases the broker and the target after each call");
+    println!("DCOM PROXY APP OK");
+}
+
+unsafe fn host_requests(obj: *mut c_void, factory: *mut c_void, conn: u64) -> Vec<u32> {
     let (Some(dm), Some(app)) = (query(obj, &IID_DISPLAY_MODE), query(obj, &IID_APP_MQ)) else {
+        let mut sipc = core::ptr::null_mut();
+        assert_eq!(create(factory, &mut sipc), S_OK);
+        if let Some(app) = query(obj, &IID_APP_MQ).or_else(|| query(sipc, &IID_APP_MQ)) {
+            dcom_proxy_app(app);
+            release(app);
+        }
+        if let Some(v1) = query(sipc, &IID_SIPC_PROXY_CONTROL) {
+            let id = Guid { data1: 0x1111_2222, data2: 3, data3: 4, data4: [5, 6, 7, 8, 9, 10, 11, 12] };
+            let hr = vcall::<unsafe extern "system" fn(*mut c_void, *const Guid, u16) -> i32>(v1, 4)(v1, &id, 3);
+            assert_eq!(hr, S_OK, "ISIPCProxyControl slot 4 completes through IGameCoreSipcProxyController on the emulated host");
+            assert_eq!(console_sandbox::gcdcom::all_refs(), [0; 4]);
+            release(v1);
+            println!("DCOM PROXY CLOSE OK");
+        }
+        release(sipc);
+        let raw = console_sandbox::xvcmgmt::host_take_received(conn);
+        let (msgs, used, _) = console_sandbox::gchost::parse(&raw, 0);
+        assert_eq!(used, raw.len());
+        let pid = std::process::id();
+        assert_eq!(msgs, vec![(console_sandbox::gchost::WINDOW_MESSAGING, pid.to_le_bytes().to_vec())], "the only queue traffic is the windowmessaging.cpp registration of this process");
+        assert_eq!(console_sandbox::gchost::window_pids(conn), vec![pid]);
         return Vec::new();
     };
     let found = [(dm, 3usize), (dm, 4), (app, 3)];
@@ -233,6 +265,9 @@ fn class_objects_run_every_console_dump_under_the_sandbox() {
         if c != "auto" {
             let want = if c.contains("Fortnite") { "HOST REQUESTS []" } else { "HOST REQUESTS [5, 65543, 131079, 5, 6553663]" };
             assert!(text.contains(want), "case {c} must issue {want}:\n{text}");
+            if c.contains("Fortnite") {
+                assert!(text.contains("DCOM PROXY APP OK") && text.contains("DCOM PROXY CLOSE OK"), "case {c}: the proxy-app calls go over DCOM to the host:\n{text}");
+            }
         }
     }
 }
@@ -290,7 +325,7 @@ fn inner_class_oracle() {
     let conns = console_sandbox::xvcmgmt::host_connections(li);
     assert_eq!(conns.len(), 1, "the console queue client connected to the emulated host on {{c12a416b, XBOX://LI}}");
     assert!(console_sandbox::xvcmgmt::host_take_received(conns[0]).is_empty(), "construction sends nothing to the host");
-    let issued = unsafe { host_requests(obj2, conns[0]) };
+    let issued = unsafe { host_requests(obj2, f1, conns[0]) };
     println!("HOST REQUESTS {issued:?}");
     unsafe {
         release(obj2);

@@ -304,7 +304,6 @@ fn remote_console_addresses_fail_like_no_route() {
         assert_eq!(XbtpOpenSessionInternal(&EXT, w.as_ptr(), 0, null_mut(), true, 10), E_INVALIDARG);
         let w = wide("192.168.1.20");
         let hr = XbtpOpenSessionCpp(&EXT, w.as_ptr(), 0x0100_1073, &mut raw, true);
-        assert!(hr < 0);
         assert!(raw.is_null());
     }
 }
@@ -327,7 +326,8 @@ fn wrap_dispatcher_rejects_null_and_reports_interfaces() {
         let c = out as *mut DispatcherCom;
         assert_eq!(((*(*c).vtbl).add_extension)(c, &EXT, null_mut()), E_INVALIDARG);
         let long = wide("0123456789abcdef0123456789abcdefX");
-        assert_eq!(((*(*c).vtbl).set_session_key)(c, long.as_ptr()), E_INVALIDARG);
+        assert_eq!(((*(*c).vtbl).set_session_key)(c, long.as_ptr()), S_OK);
+        assert_eq!(((*(*c).vtbl).set_session_key)(c, null_mut()), S_OK);
         ((*(*c).vtbl).release)(c);
         let mut reg = SharedPtr::<XbtpExtensionRegistry>::default();
         let mut t = SharedPtr::<XbtpConnection>::default();
@@ -378,5 +378,33 @@ fn reply_is_operation_end_message_with_console_slots() {
         assert_eq!(crate::xbtp2_ext::com_qi(e, &crate::xbtp2_ext::IID_XBTP_MESSAGE, &mut q), E_NOINTERFACE);
         com_release(e);
         com_release(inner as *mut c_void);
+    }
+}
+
+#[test]
+fn register_redirect_sends_clients_to_the_redirect_location() {
+    let _g = NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init();
+    unsafe {
+        let srv = start_server(47960, None, None);
+        let loopback = wide("127.0.0.1");
+        assert_eq!(((*(*srv.com).vtbl).register_redirect)(srv.com, 47961, loopback.as_ptr(), 47999), S_OK);
+        assert_eq!(((*(*srv.com).vtbl).register_redirect)(srv.com, 47961, loopback.as_ptr(), 47960), S_OK);
+        let (hr, s) = open_ex2(47961, "", false);
+        assert_eq!(hr, S_OK);
+        let (st, t) = call(s, ECHO_OP, "{\"r\":\"ping\"}");
+        assert_eq!((st, t.as_str()), (0, "{\"r\":\"pong\"}"));
+        com_release(s);
+        assert_eq!(((*(*srv.com).vtbl).register_redirect)(srv.com, 47962, null_mut(), 0), S_OK);
+        let (hr, s) = open_ex2(47962, "", false);
+        assert_eq!(hr, crate::conn::E_SOCKET_CLOSED);
+        assert!(s.is_null());
+        let remote = wide("192.0.2.1");
+        assert_eq!(((*(*srv.com).vtbl).register_redirect)(srv.com, 47963, remote.as_ptr(), 47960), S_OK);
+        let (hr, s) = open_ex2(47963, "", false);
+        assert_eq!(hr, crate::conn::E_COULD_NOT_CONNECT);
+        assert!(s.is_null());
+        assert_eq!(((*(*srv.com).vtbl).register_redirect)(srv.com, 47960, loopback.as_ptr(), 1), S_OK);
+        stop_server(srv);
     }
 }

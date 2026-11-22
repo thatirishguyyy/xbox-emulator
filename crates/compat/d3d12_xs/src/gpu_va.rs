@@ -208,16 +208,71 @@ pub fn xbox_texture_size(desc: &[u8]) -> u64 {
         u16at(0x1c).max(1), u16at(0x1e).max(1), u32at(0x20), (u32at(0x24) as u64).max(1))
 }
 
-pub unsafe fn back_committed_texture(desc: &[u8]) -> Option<u64> {
+pub fn console_size_with(desc: &[u8], xg: impl Fn(&[u8]) -> Result<(u64, u64), i32>) -> u64 {
+    let est = xbox_texture_size(desc);
+    let d = &desc[..crate::device_console_fix::RES_DESC_SIZE];
+    let reported = crate::device_console_fix::alloc_info_with(d, 1, |d| crate::device_console_fix::texture_part(xg(d), || (est, 0x10000))).0;
+    reported.max(est)
+}
+
+pub fn console_texture_size(desc: &[u8]) -> u64 {
+    let fam = crate::device_console_fix::title_family();
+    let size = if crate::device_console_fix::xg_available(fam) {
+        console_size_with(desc, |d| crate::device_console_fix::xg_texture_alloc(d, fam))
+    } else {
+        xbox_texture_size(desc)
+    };
+    size.max(crate::xone_tex::xg_size(desc).unwrap_or(0))
+}
+
+pub fn is_texture_desc(desc: &[u8]) -> bool {
+    desc.len() >= 0x38 && u32::from_le_bytes(desc[0..4].try_into().unwrap()) >= 2
+}
+
+pub unsafe fn alloc_backing(size: u64) -> Option<u64> {
     extern "system" {
         fn VirtualAlloc(addr: *mut c_void, size: usize, ty: u32, protect: u32) -> *mut c_void;
     }
-    if !expose_texture_va() || desc.len() < 0x38 || u32::from_le_bytes(desc[0..4].try_into().unwrap()) < 2 {
-        return None;
-    }
-    let size = xbox_texture_size(desc).max(crate::xone_tex::xg_size(desc).unwrap_or(0));
+    let size = (size.max(1) + 0xffff) & !0xffff;
     let p = unsafe { VirtualAlloc(core::ptr::null_mut(), size as usize, 0x3000, 0x04) };
     if p.is_null() { None } else { Some(p as u64) }
+}
+
+pub unsafe fn alloc_texture_backing(desc: &[u8]) -> Option<u64> {
+    if !is_texture_desc(desc) {
+        return None;
+    }
+    unsafe { alloc_backing(console_texture_size(desc)) }
+}
+
+pub unsafe fn back_committed_texture(desc: &[u8]) -> Option<u64> {
+    if !expose_texture_va() {
+        return None;
+    }
+    unsafe { alloc_texture_backing(desc) }
+}
+
+pub unsafe fn adopt_backing(res: *mut c_void, va: u64, xdesc: [u8; 0x38], init_state: u32) {
+    let addref: unsafe extern "system" fn(*mut c_void) -> u32 = unsafe { core::mem::transmute(*(*(res as *const *const usize)).add(1)) };
+    unsafe { addref(res) };
+    COMMITTED_TEX.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|m| m.remove(&(res as usize)));
+    crate::placed::register(res, crate::placed::Placed { va, desc: xdesc, init_state });
+}
+
+static COMMITTED_TEX: Mutex<Option<HashMap<usize, [u8; 0x38]>>> = Mutex::new(None);
+
+pub fn note_committed_texture(res: *mut c_void, xdesc: [u8; 0x38]) {
+    if !res.is_null() {
+        COMMITTED_TEX.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(res as usize, xdesc);
+    }
+}
+
+pub fn committed_texture_desc(res: *mut c_void) -> Option<[u8; 0x38]> {
+    COMMITTED_TEX.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&(res as usize)).copied())
+}
+
+pub fn same_texture(xbox: &[u8], pc: &[u8]) -> bool {
+    xbox.len() >= 0x24 && pc.len() >= 0x24 && xbox[0..4] == pc[0..4] && xbox[0x10..0x1c] == pc[0x10..0x1c] && xbox[0x20..0x24] == pc[0x20..0x24]
 }
 
 pub unsafe fn note_resource(real_device: *mut c_void, res: *mut c_void, desc: &[u8], init_state: u32, placed_va: Option<u64>) {
@@ -272,6 +327,50 @@ mod tests {
         assert_eq!(lookup(a + 0x2ffff).map(|(e, _)| (e.res, e.buffer)), Some((0x5000, false)));
         let p = assign_texture_va(0x7000, 0x20000, Some(0x2_0000_0000));
         assert_eq!(p, 0x2_0000_0000);
+    }
+
+    fn tex2d(w: u64, h: u32, fmt: u32, mips: u16) -> [u8; 0x38] {
+        let mut d = [0u8; 0x38];
+        d[0..4].copy_from_slice(&3u32.to_le_bytes());
+        d[0x10..0x18].copy_from_slice(&w.to_le_bytes());
+        d[0x18..0x1c].copy_from_slice(&h.to_le_bytes());
+        d[0x1c..0x1e].copy_from_slice(&1u16.to_le_bytes());
+        d[0x1e..0x20].copy_from_slice(&mips.to_le_bytes());
+        d[0x20..0x24].copy_from_slice(&fmt.to_le_bytes());
+        d[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
+        d[0x30..0x34].copy_from_slice(&1u32.to_le_bytes());
+        d
+    }
+
+    #[test]
+    fn committed_texture_backing_covers_the_xg_allocation_size() {
+        let d = tex2d(1904, 1041, 28, 1);
+        assert_eq!(xbox_texture_size(&d), 0x87_0000);
+        let size = console_size_with(&d, |_| Ok((0x87_8000, 0x1_0000)));
+        assert_eq!(size, 0x87_8000);
+        assert_eq!(console_size_with(&d, |_| Err(crate::device_console_fix::XG_E_NOTIMPL)), 0x87_0000);
+        assert_eq!(console_size_with(&d, |_| Ok((0x1000, 0x1000))), 0x87_0000);
+        let va = unsafe { alloc_backing(size) }.expect("backing");
+        unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
+        assert_eq!(unsafe { *((va + size - 1) as *const u8) }, 0);
+    }
+
+    #[test]
+    fn committed_texture_desc_matches_only_the_same_texture() {
+        let x = tex2d(1904, 1041, 28, 1);
+        let mut pc = x;
+        pc[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
+        pc[0x1e..0x20].copy_from_slice(&0u16.to_le_bytes());
+        assert!(same_texture(&x, &pc));
+        assert!(!same_texture(&x, &tex2d(1904, 1042, 28, 1)));
+        assert!(!same_texture(&x, &tex2d(1904, 1041, 29, 1)));
+        let res = 0x7777_0000usize as *mut c_void;
+        note_committed_texture(res, x);
+        assert_eq!(committed_texture_desc(res), Some(x));
+        assert!(is_texture_desc(&x));
+        let mut buf = x;
+        buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(!is_texture_desc(&buf));
     }
 
     #[test]

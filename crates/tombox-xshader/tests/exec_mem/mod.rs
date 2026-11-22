@@ -72,7 +72,7 @@ fn table(range_type: u32, num: u32) -> RootParam {
 }
 
 pub fn root() -> RootSig {
-    RootSig { version: 2, flags: 1, params: vec![table(0, 64), table(0, 1), table(3, 16), table(0, 1), table(1, 8)], num_static_samplers: 0 }
+    RootSig { version: 2, flags: 1, params: vec![table(0, 64), table(0, 1), table(3, 16), table(0, 1), table(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() }
 }
 
 pub fn extract(words: &[u32], pos: bool) -> ShaderExtract {
@@ -462,7 +462,7 @@ fn mem_device_features() {
 pub const CS_BYTES: u64 = 4096;
 
 pub fn cs_extract(words: &[u32], threads: u32) -> ShaderExtract {
-    let mut ex = shader_root(words, RootSig { version: 2, flags: 1, params: vec![table(1, 8)], num_static_samplers: 0 });
+    let mut ex = shader_root(words, RootSig { version: 2, flags: 1, params: vec![table(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() });
     ex.stage = Stage::Compute;
     ex.isa_preamble = [0, threads, 1, 1];
     ex.output_sig = vec![];

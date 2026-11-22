@@ -1,4 +1,5 @@
 use crate::console::{ck, w};
+use crate::variant::ConsoleCopy;
 use crate::win::*;
 use core::ffi::c_void;
 use core::ptr::{null, null_mut};
@@ -16,34 +17,45 @@ pub const FACILITY_NT_BIT: u32 = 0x1000_0000;
 pub const RUN_FLAG_TOOLS_JOB: u32 = 4;
 pub const RUN_FLAG_KEEP_TOKEN: u32 = 2;
 pub const ATTRIBUTE_LIST_SIZE: usize = 0x30;
+pub const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;
+pub const DISABLE_MAX_PRIVILEGE: u32 = 1;
+
+pub unsafe fn inherited_handles(si: *const StartupInfoExW) -> Vec<HANDLE> {
+    let mut v: Vec<HANDLE> = Vec::new();
+    if (*si).si.flags & STARTF_USESTDHANDLES == 0 {
+        return v;
+    }
+    for h in [(*si).si.std_input, (*si).si.std_output, (*si).si.std_error] {
+        if !h.is_null() && h != INVALID_HANDLE_VALUE && !v.contains(&h) {
+            v.push(h);
+        }
+    }
+    v
+}
 
 static JOBS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 static IMAGES: Mutex<Vec<(String, PathBuf)>> = Mutex::new(Vec::new());
 
-fn norm(p: &str) -> String {
-    p.replace('/', "\\").to_ascii_lowercase()
+pub(crate) fn console_key(console_path: &str) -> Option<String> {
+    console_sandbox::fs::try_resolve(console_path).ok().map(|(c, _)| c.to_ascii_lowercase())
 }
 
-pub fn register_job(name: &str, job: HANDLE) {
+pub(crate) fn register_job(name: &str, job: HANDLE) {
     let mut j = JOBS.lock().unwrap_or_else(|e| e.into_inner());
     j.retain(|(n, _)| n != name);
     j.push((name.to_string(), job as usize));
 }
 
-pub fn unregister_job(name: &str) {
+#[cfg(test)]
+pub(crate) fn unregister_job(name: &str) {
     JOBS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(n, _)| n != name);
 }
 
-pub fn register_image(console_path: &str, host: PathBuf) {
-    let key = norm(console_path);
+pub(crate) fn register_image(console_path: &str, host: PathBuf) {
+    let Some(key) = console_key(console_path) else { return };
     let mut i = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
     i.retain(|(n, _)| *n != key);
     i.push((key, host));
-}
-
-pub fn unregister_image(console_path: &str) {
-    let key = norm(console_path);
-    IMAGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|(n, _)| *n != key);
 }
 
 unsafe fn duplicate(h: usize) -> Result<HANDLE, u32> {
@@ -103,15 +115,12 @@ pub fn resolve_image(cmd: &str) -> Result<String, u32> {
         cands.push(format!("{image}.exe"));
     }
     let images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
-    for c in &cands {
-        let key = norm(c);
+    for key in cands.iter().filter_map(|c| console_key(c)) {
         if let Some((_, host)) = images.iter().find(|(n, _)| *n == key) {
             return Ok(format!("\"{}\"{}", host.display(), rest));
         }
     }
-    drop(images);
-    let present = cands.iter().filter_map(|i| console_sandbox::fs::resolve(i)).any(|(_, h)| h.is_file());
-    Err(if present { ERROR_NOT_SUPPORTED } else { ERROR_FILE_NOT_FOUND })
+    Err(ERROR_FILE_NOT_FOUND)
 }
 
 pub fn resolve_directory(dir: &str) -> Result<PathBuf, u32> {
@@ -138,15 +147,16 @@ fn hr_last() -> HRESULT {
     last_error_or_fail()
 }
 
-pub unsafe fn remote_run_create_process(cmd: *const u16, wd: *const u16, flags: u32, si: *mut StartupInfoExW, pi: *mut ProcessInformation) -> HRESULT {
+pub unsafe fn remote_run_create_process(copy: ConsoleCopy, cmd: *const u16, wd: *const u16, flags: u32, si: *mut StartupInfoExW, pi: *mut ProcessInformation) -> HRESULT {
     const F: &str = "RemoteRunCreateProcess";
+    crate::title::ensure();
     *pi = ProcessInformation::zeroed();
     let default_wd = w(DEFAULT_WORKING_DIRECTORY);
     let wd = if wd.is_null() || *wd == 0 { default_wd.as_ptr() } else { wd };
     let command = expand_environment_strings(cmd);
-    ck(F, 432, "strCommandLine.ExpandEnvironmentStrings(pszCommandLine)", S_OK, "");
+    ck(F, copy.create_process_line(432), "strCommandLine.ExpandEnvironmentStrings(pszCommandLine)", S_OK, "");
     let directory = expand_environment_strings(wd);
-    ck(F, 433, "strWorkingDirectory.ExpandEnvironmentStrings(pszWorkingDirectory)", S_OK, "");
+    ck(F, copy.create_process_line(433), "strWorkingDirectory.ExpandEnvironmentStrings(pszWorkingDirectory)", S_OK, "");
     let mut tools = flags & RUN_FLAG_TOOLS_JOB != 0;
     let nt_job = loop {
         let (status, h) = nt_open_job_object(if tools { NT_TOOLS_JOB } else { NT_TITLE_JOB });
@@ -159,33 +169,41 @@ pub unsafe fn remote_run_create_process(cmd: *const u16, wd: *const u16, flags: 
         }
         break OwnedHandle(h);
     };
-    let host_job = OwnedHandle(open_job_object_w(if tools { HOST_TOOLS_JOB } else { HOST_TITLE_JOB }));
-    if host_job.get().is_null() {
+    let host_job = if copy.has_host_jobs() { OwnedHandle(open_job_object_w(if tools { HOST_TOOLS_JOB } else { HOST_TITLE_JOB })) } else { OwnedHandle::null() };
+    if copy.has_host_jobs() && host_job.get().is_null() {
         let hr = hr_from_wait(xtfmsg::sys::GetLastError());
         ck(F, 503, "HRESULT_FROM_WIN32(GetLastError())", hr, "");
         if hr < 0 {
             return hr;
         }
     }
-    let mut list = [0u64; ATTRIBUTE_LIST_SIZE / 8];
-    let mut size = ATTRIBUTE_LIST_SIZE;
+    let handles = inherited_handles(si);
+    let count = if handles.is_empty() { 1 } else { 2 };
+    let mut size = 0usize;
+    InitializeProcThreadAttributeList(null_mut(), count, 0, &mut size);
+    let mut list = vec![0u64; size.max(ATTRIBUTE_LIST_SIZE) / 8 + 1];
+    let mut size = list.len() * 8;
     let list_ptr = list.as_mut_ptr() as *mut c_void;
-    if InitializeProcThreadAttributeList(list_ptr, 1, 0, &mut size) == 0 {
+    if InitializeProcThreadAttributeList(list_ptr, count, 0, &mut size) == 0 {
         return hr_last();
     }
     let hr = 'attr: {
         let jobs: [HANDLE; 2] = [nt_job.get(), host_job.get()];
-        if UpdateProcThreadAttribute(list_ptr, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs.as_ptr() as *const c_void, 0x10, null_mut(), null_mut()) == 0 {
+        let list_bytes = if copy.has_host_jobs() { 2 * core::mem::size_of::<HANDLE>() } else { core::mem::size_of::<HANDLE>() };
+        if UpdateProcThreadAttribute(list_ptr, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs.as_ptr() as *const c_void, list_bytes, null_mut(), null_mut()) == 0 {
+            break 'attr hr_last();
+        }
+        if !handles.is_empty() && UpdateProcThreadAttribute(list_ptr, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.as_ptr() as *const c_void, handles.len() * core::mem::size_of::<HANDLE>(), null_mut(), null_mut()) == 0 {
             break 'attr hr_last();
         }
         (*si).attribute_list = list_ptr;
         let mut token = OwnedHandle::null();
-        let mut primary = OwnedHandle::null();
+        let mut restricted = OwnedHandle::null();
         if flags & RUN_FLAG_KEEP_TOKEN == 0 {
             if OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut token.0) == 0 {
                 break 'attr hr_last();
             }
-            if DuplicateTokenEx(token.get(), 0, null(), SECURITY_IMPERSONATION, TOKEN_PRIMARY, &mut primary.0) == 0 {
+            if CreateRestrictedToken(token.get(), DISABLE_MAX_PRIVILEGE, 0, null(), 0, null(), 0, null(), &mut restricted.0) == 0 {
                 break 'attr hr_last();
             }
         }
@@ -211,7 +229,8 @@ pub unsafe fn remote_run_create_process(cmd: *const u16, wd: *const u16, flags: 
         let mut cmd_w = w(&host_cmd);
         let dir_w = host_dir.map(|d| w(&d.to_string_lossy()));
         let creation = (CONSOLE_CREATION_FLAGS & !(CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB)) | CREATE_NO_WINDOW;
-        if CreateProcessW(null(), cmd_w.as_mut_ptr(), null(), null(), 1, creation, null(), dir_w.as_ref().map_or(null(), |d| d.as_ptr()), si, pi) == 0 {
+        let inherit = if handles.is_empty() { 0 } else { 1 };
+        if CreateProcessAsUserW(restricted.get(), null(), cmd_w.as_mut_ptr(), null(), null(), inherit, creation, null(), dir_w.as_ref().map_or(null(), |d| d.as_ptr()), si, pi) == 0 {
             break 'attr hr_last();
         }
         let mut process_mask = 0usize;

@@ -3,7 +3,7 @@ name = "dxbc2dxil_xs"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox console dxbc2dxil_xs.dll (DXBC shader model 5 to DXIL converter used by sc_dll/xbsc_xs): SCDxil_ConvertDxbcToDxil forwarded to the console's own dxbc2dxil_xs.dll, which loads on PC unchanged."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

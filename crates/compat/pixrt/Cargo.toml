@@ -3,7 +3,7 @@ name = "pixrt"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox console pixrt.dll: the console's lazy tooling-memory setup (xvcmgmt overflow probe, xmem tools-partition heap, working-set check and its PIX debug messages), its E_OUTOFMEMORY guard on all three exports, and the tooling-memory allocator table."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

@@ -48,6 +48,17 @@ static DESC_VT: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
 static DESC_ORIG: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
 static DESC_LOCK: Mutex<()> = Mutex::new(());
 
+thread_local! {
+    static RUNTIME_VIEW: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+pub fn with_true_desc<R>(f: impl FnOnce() -> R) -> R {
+    RUNTIME_VIEW.with(|c| c.set(c.get() + 1));
+    let r = f();
+    RUNTIME_VIEW.with(|c| c.set(c.get() - 1));
+    r
+}
+
 pub fn plan(va: u64, desc: &[u8; 0x38]) -> Option<(u64, u64, [u8; 0x38])> {
     let dim = u32::from_le_bytes(desc[0..4].try_into().unwrap());
     let o = va % PAGE;
@@ -183,6 +194,9 @@ unsafe extern "system" fn get_desc_x(this: *mut c_void, out: *mut u8) -> *mut u8
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut u8) -> *mut u8 = unsafe { core::mem::transmute(orig) };
     let r = unsafe { f(this, out) };
+    if RUNTIME_VIEW.with(|c| c.get()) != 0 {
+        return r;
+    }
     if let Some(o) = of(this as usize) {
         if !r.is_null() {
             unsafe { core::ptr::write_unaligned(r.add(0x10) as *mut u64, o.width) };
@@ -365,12 +379,12 @@ unsafe extern "system" fn srv(this: *mut c_void, res: *mut c_void, desc: *const 
     unsafe { core::ptr::copy_nonoverlapping(desc, v.as_mut_ptr(), 0x28) };
     let orig = v;
     if let Some(t) = unsafe { exact_view(res as usize, &mut v, crate::console_slots_dev2::SRV_BUFFER) } {
-        return unsafe { f(this, t, v.as_ptr(), dest) };
+        return with_true_desc(|| unsafe { f(this, t, v.as_ptr(), dest) });
     }
     v = orig;
     rebase_view(&mut v, crate::console_slots_dev2::SRV_BUFFER, o);
     uneven("CreateShaderResourceView", o, &v, crate::console_slots_dev2::SRV_BUFFER);
-    unsafe { f(this, res, v.as_ptr(), dest) }
+    with_true_desc(|| unsafe { f(this, res, v.as_ptr(), dest) })
 }
 
 unsafe extern "system" fn uav(this: *mut c_void, res: *mut c_void, counter: *mut c_void, desc: *const u8, dest: usize) {
@@ -396,7 +410,7 @@ unsafe extern "system" fn uav(this: *mut c_void, res: *mut c_void, counter: *mut
             }
         }
     }
-    unsafe { f(this, target, counter, v.as_ptr(), dest) }
+    with_true_desc(|| unsafe { f(this, target, counter, v.as_ptr(), dest) })
 }
 
 pub fn install(v: &mut [usize]) {
@@ -412,7 +426,7 @@ fn prev(slot: usize) -> usize {
 
 unsafe extern "system" fn copy_buffer(this: *mut c_void, dst: *mut c_void, doff: u64, src: *mut c_void, soff: u64, n: u64) {
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u64, *mut c_void, u64, u64) = unsafe { core::mem::transmute(prev(CL_COPY_BUFFER)) };
-    unsafe { f(this, dst, doff + bytes(dst as usize), src, soff + bytes(src as usize), n) }
+    with_true_desc(|| unsafe { f(this, dst, doff + bytes(dst as usize), src, soff + bytes(src as usize), n) })
 }
 
 fn shift_location(loc: &mut [u8; LOCATION]) -> bool {
@@ -432,7 +446,7 @@ unsafe extern "system" fn copy_texture(this: *mut c_void, dst: *const u8, x: u32
         return unsafe { f(this, dst, x, y, z, src, src_box) };
     }
     let (d, s) = unsafe { shifted(dst, src) };
-    unsafe { f(this, d.as_ref().map_or(dst, |b| b.as_ptr()), x, y, z, s.as_ref().map_or(src, |b| b.as_ptr()), src_box) }
+    with_true_desc(|| unsafe { f(this, d.as_ref().map_or(dst, |b| b.as_ptr()), x, y, z, s.as_ref().map_or(src, |b| b.as_ptr()), src_box) })
 }
 
 unsafe fn shifted(dst: *const u8, src: *const u8) -> (Option<[u8; LOCATION]>, Option<[u8; LOCATION]>) {
@@ -451,7 +465,7 @@ unsafe extern "system" fn copy_texture_x(this: *mut c_void, dst: *const u8, x: u
         return unsafe { f(this, dst, x, y, z, src, src_box, flags) };
     }
     let (d, s) = unsafe { shifted(dst, src) };
-    unsafe { f(this, d.as_ref().map_or(dst, |b| b.as_ptr()), x, y, z, s.as_ref().map_or(src, |b| b.as_ptr()), src_box, flags) }
+    with_true_desc(|| unsafe { f(this, d.as_ref().map_or(dst, |b| b.as_ptr()), x, y, z, s.as_ref().map_or(src, |b| b.as_ptr()), src_box, flags) })
 }
 
 
@@ -481,7 +495,7 @@ unsafe extern "system" fn copy_resource(this: *mut c_void, dst: *mut c_void, src
         if let Some((a, b, n)) = resource_copy_span(od, dw, os, sw) {
             crate::placed::note_gpu_write(dst);
             let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u64, *mut c_void, u64, u64) = unsafe { core::mem::transmute(prev(CL_COPY_BUFFER)) };
-            return unsafe { f(this, dst, a, src, b, n) };
+            return with_true_desc(|| unsafe { f(this, dst, a, src, b, n) });
         }
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) = unsafe { core::mem::transmute(prev(CL_COPY_RESOURCE)) };
@@ -496,7 +510,7 @@ unsafe extern "system" fn copy_resource_x(this: *mut c_void, dst: *mut c_void, s
         if let Some((a, b, n)) = resource_copy_span(od, dw, os, sw) {
             crate::placed::note_gpu_write(dst);
             let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u64, *mut c_void, u64, u64) = unsafe { core::mem::transmute(prev(CL_COPY_BUFFER)) };
-            return unsafe { f(this, dst, a, src, b, n) };
+            return with_true_desc(|| unsafe { f(this, dst, a, src, b, n) });
         }
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void, u32) = unsafe { core::mem::transmute(prev(CL_COPY_RESOURCE_X)) };
@@ -505,17 +519,17 @@ unsafe extern "system" fn copy_resource_x(this: *mut c_void, dst: *mut c_void, s
 
 unsafe extern "system" fn resolve_query(this: *mut c_void, heap: *mut c_void, ty: u32, start: u32, n: u32, dst: *mut c_void, off: u64) {
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u32, u32, *mut c_void, u64) = unsafe { core::mem::transmute(prev(CL_RESOLVE_QUERY)) };
-    unsafe { f(this, heap, ty, start, n, dst, off + bytes(dst as usize)) }
+    with_true_desc(|| unsafe { f(this, heap, ty, start, n, dst, off + bytes(dst as usize)) })
 }
 
 unsafe extern "system" fn predication(this: *mut c_void, buf: *mut c_void, off: u64, op: u32) {
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u64, u32) = unsafe { core::mem::transmute(prev(CL_PREDICATION)) };
-    unsafe { f(this, buf, off + bytes(buf as usize), op) }
+    with_true_desc(|| unsafe { f(this, buf, off + bytes(buf as usize), op) })
 }
 
 unsafe extern "system" fn indirect(this: *mut c_void, sig: *mut c_void, max: u32, arg: *mut c_void, arg_off: u64, cnt: *mut c_void, cnt_off: u64) {
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, *mut c_void, u64, *mut c_void, u64) = unsafe { core::mem::transmute(prev(CL_INDIRECT)) };
-    unsafe { f(this, sig, max, arg, arg_off + bytes(arg as usize), cnt, cnt_off + bytes(cnt as usize)) }
+    with_true_desc(|| unsafe { f(this, sig, max, arg, arg_off + bytes(arg as usize), cnt, cnt_off + bytes(cnt as usize)) })
 }
 
 unsafe extern "system" fn discard(this: *mut c_void, res: *mut c_void, region: *const c_void) {
@@ -862,4 +876,14 @@ mod tests {
             vc!(dev, 2, fn() -> u32);
         }
     }
+}
+
+#[cfg(test)]
+pub unsafe fn unpatched_width(res: *mut c_void) -> Option<u64> {
+    let vtv = unsafe { *(res as *const usize) };
+    let orig = DESC_VT.iter().position(|p| p.load(Ordering::Acquire) == vtv).map(|i| DESC_ORIG[i].load(Ordering::Acquire))?;
+    let f: unsafe extern "system" fn(*mut c_void, *mut u8) -> *mut u8 = unsafe { core::mem::transmute(orig) };
+    let mut d = [0u8; 0x38];
+    let r = unsafe { f(res, d.as_mut_ptr()) };
+    Some(u64::from_le_bytes(unsafe { core::slice::from_raw_parts(r.add(0x10), 8) }.try_into().unwrap()))
 }

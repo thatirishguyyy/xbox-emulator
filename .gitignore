@@ -28,3 +28,4 @@ emulator/
 *.xvc.*
 *.part
 *.crdownload
+tools/progress/proposed_*.json

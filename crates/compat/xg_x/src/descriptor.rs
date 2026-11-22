@@ -41,7 +41,7 @@ pub fn decode(d: &[u32; 8]) -> Result<Desc, (i32, String)> {
         _ => 1,
     };
     let dxgi = dxgi_for(data_format).ok_or((E_FAIL, format!("GCN data format {data_format} has no surface layout")))?;
-    Ok(Desc { dimension, width, height, depth_or_array, mips, dxgi, samples, mode })
+    Ok(Desc { dimension, width, height, depth_or_array, mips, dxgi, samples, mode, pitch: 0 })
 }
 
 #[no_mangle]

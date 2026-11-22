@@ -3,7 +3,7 @@ name = "xtfeventserver"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console xtfeventserver.dll (Xbox Tools Framework ETW event server extension)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

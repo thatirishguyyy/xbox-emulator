@@ -3,7 +3,7 @@ name = "tombox-loader"
 version = "0.1.0"
 edition = "2021"
 description = "Compatibility image loader: maps a PE module, applies relocations, and binds imports. Windows x64."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "tombox_loader"

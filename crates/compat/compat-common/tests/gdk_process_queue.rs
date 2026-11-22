@@ -7,6 +7,10 @@ unsafe fn method(clsid: Guid, iid: Guid, slot: usize) -> (*mut c_void, usize) {
     (obj, *(*(obj as *const *const usize)).add(slot))
 }
 
+extern "system" {
+    fn SetErrorMode(mode: u32) -> u32;
+}
+
 unsafe extern "system" fn task(_c: *mut c_void, _canceled: bool) {}
 unsafe extern "system" fn on_state(_ctx: *mut c_void, _client: u64, _state: u32) {}
 
@@ -61,4 +65,33 @@ fn set_current_process_task_queue_replaces_and_clears_the_process_queue() {
         assert_eq!(reg(so, 0, core::ptr::null_mut(), on_state as *const () as usize, &mut tok), 0);
         assert_eq!(terminate(o, def, false, core::ptr::null_mut(), 0), 0x8007_0005u32 as i32);
     }
+}
+
+#[test]
+#[ignore]
+fn set_current_process_task_queue_invalid_handle_child() {
+    if std::env::var("TOMBOX_PQ_FAILFAST_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    std::env::set_var("TOMBOX_GDK_XASYNC", "emulated");
+    std::env::set_var("TOMBOX_GDK_ROOT", std::env::temp_dir().join(format!("tombox_gdk_pqc_{}", std::process::id())));
+    unsafe {
+        SetErrorMode(0x8003);
+        let x = xasync::XASYNC;
+        let (o, set) = method(x, x, 26);
+        let set: unsafe extern "system" fn(*mut c_void, usize) = core::mem::transmute(set);
+        let fake = vec![0u64; 64];
+        set(o, fake.as_ptr() as usize);
+    }
+    std::process::exit(0);
+}
+
+#[test]
+fn set_current_process_task_queue_fail_fasts_on_an_invalid_handle() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "set_current_process_task_queue_invalid_handle_child", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("TOMBOX_PQ_FAILFAST_CHILD", "1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0xC000_0602u32 as i32));
 }

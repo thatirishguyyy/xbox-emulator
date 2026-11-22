@@ -3,7 +3,7 @@ name = "xcurl"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox GDK XCurl.dll: the libcurl easy/multi/slist/url API implemented on WinHTTP, so every transfer passes through the compat-common network guard."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xcurl"

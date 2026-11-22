@@ -3,7 +3,7 @@ name = "tombox-disasm"
 version = "0.1.0"
 edition = "2021"
 description = "Disassemble a range of a PE by RVA, resolving call/branch targets to UE symbol names."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "disasm"

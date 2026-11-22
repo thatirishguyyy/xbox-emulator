@@ -3,7 +3,7 @@ name = "minappmodelx"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console minappmodelx.dll, host of api-ms-win-core-psm-appnotify-l1-1-0/l1-1-1: app-state (suspend/resume) and constrained-mode change registrations delivered from the emulator PLM state machine in compat-common os_host::plm."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

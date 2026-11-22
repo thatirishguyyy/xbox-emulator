@@ -14,11 +14,11 @@ use std::sync::{Mutex, Once};
 static INIT: Once = Once::new();
 static SERIAL: Mutex<()> = Mutex::new(());
 
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     std::env::temp_dir().join(format!("xtffileio-test-{}", std::process::id()))
 }
 
-fn guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn guard() -> std::sync::MutexGuard<'static, ()> {
     INIT.call_once(|| {
         let r = root();
         let _ = std::fs::remove_dir_all(&r);
@@ -29,11 +29,11 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn host(console: &str) -> PathBuf {
+pub(crate) fn host(console: &str) -> PathBuf {
     host_path(console).unwrap().path
 }
 
-fn fresh(dir: &str) -> String {
+pub(crate) fn fresh(dir: &str) -> String {
     let c = format!("D:\\{dir}");
     let h = host(&c);
     let _ = std::fs::remove_dir_all(&h);
@@ -609,4 +609,7 @@ fn export_table_matches_console_dll() {
     let ex = xtfcommon::exports::parse(&text);
     let e4 = ex.iter().find(|e| e.ordinal == 4).unwrap();
     assert!(xtfcommon::exports::source_defines(concat!(env!("CARGO_MANIFEST_DIR"), "/src"), e4));
+    let e5 = ex.iter().find(|e| e.ordinal == 5).unwrap();
+    assert_eq!((e5.name.as_str(), e5.status.as_str()), ("XtfCreateFileIOClient", "missing"));
+    assert!(!xtfcommon::exports::source_defines(concat!(env!("CARGO_MANIFEST_DIR"), "/src"), e5));
 }

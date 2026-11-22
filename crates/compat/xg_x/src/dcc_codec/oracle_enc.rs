@@ -72,7 +72,7 @@ fn oracle_xgx_dcc_enc_e2e() {
                 d.s[0] = s0;
                 c.set_surf(0, &s0);
                 let mut n = d.clone();
-                if enc::run(&mut n).is_err() {
+                if enc::run_checked(&mut n).is_err() {
                     stopped += 1;
                     break;
                 }
@@ -168,6 +168,16 @@ fn oracle_xgx_dcc_enc_undefined_classes() {
                     continue;
                 }
                 run::Outcome::Done => continue,
+            }
+            let spills = (0..FILLS).any(|fl| {
+                let mut nd = fresh(fl, &sc);
+                nd.setup(f, t, p[0], p[1]);
+                nd.s[0] = s0;
+                matches!(enc::run_checked(&mut nd), Err(super::Stop::Undef(w)) if w.contains("overruns"))
+            });
+            if spills {
+                *faults.entry(super::run::OVERRUN.into()).or_default() += 1;
+                continue;
             }
             undef += 1;
             let mut outs = Vec::new();
@@ -266,7 +276,7 @@ fn oracle_xgx_dcc_enc_stream_overflow_layout() {
                 let mut nd = fresh(fl, &sc);
                 nd.setup(f, t, p[0], p[1]);
                 nd.s[0] = s0;
-                if let Err(super::Stop::Undef(w)) = enc::run(&mut nd) {
+                if let Err(super::Stop::Undef(w)) = enc::run_checked(&mut nd) {
                     if w.contains("overruns") {
                         pick = Some(fl);
                         break;
@@ -341,7 +351,7 @@ fn neighbour_cases(or: &super::tests::Tm) -> Vec<(String, String)> {
                     break;
                 }
                 nd.s[0] = s0;
-                if let Err(super::Stop::Undef(w)) = enc::run(&mut nd) {
+                if let Err(super::Stop::Undef(w)) = enc::run_checked(&mut nd) {
                     if neighbour_class(w) && v.iter().filter(|c| c.1 == w).count() < 6 {
                         v.push((format!("{f} {t} {} {} {} {} {fl}", p[0], p[1], hex(&s0), hex(&sc.b)), w.to_string()));
                     }

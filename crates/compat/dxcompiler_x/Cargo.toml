@@ -3,7 +3,7 @@ name = "dxcompiler_x"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for Xbox One GameCore dxcompiler_x.dll: DXC factory; forwards to a dxcompiler.dll on the search path when one exists, otherwise E_NOTIMPL like dxcompiler_xs."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

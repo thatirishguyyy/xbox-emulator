@@ -102,13 +102,8 @@ fn inner_class_oracle() {
     assert_eq!(DllCanUnloadNow(), S_OK);
     assert!(CONSOLE.handle.get().is_none(), "DllCanUnloadNow never loads the console on demand");
 
-    let mut ppv = 0x1234usize as *mut c_void;
-    assert_eq!(unsafe { DllGetClassObject(&CLSID_LOGAN_BOUND, &IID_ICLASSFACTORY, &mut ppv) }, CLASS_E_CLASSNOTAVAILABLE);
-    assert!(ppv.is_null());
-    assert!(CONSOLE.handle.get().is_none(), "the Logan-bound class is refused before the console is touched");
-
     let unknown = Guid { data1: 0x0BADC0DE, data2: 1, data3: 2, data4: [3, 4, 5, 6, 7, 8, 9, 10] };
-    ppv = 0x1234usize as *mut c_void;
+    let mut ppv = 0x1234usize as *mut c_void;
     let ours = unsafe { DllGetClassObject(&unknown, &IID_ICLASSFACTORY, &mut ppv) };
     assert_eq!((ours, ppv.is_null()), (CLASS_E_CLASSNOTAVAILABLE, true));
     let m = *CONSOLE.handle.get().expect("console loaded by DllGetClassObject");
@@ -128,7 +123,7 @@ fn inner_class_oracle() {
     assert_eq!((unsafe { theirs(&unknown, &IID_ICLASSFACTORY, &mut ppv) }, ppv.is_null()), (ours, true));
 
     let mut live = Vec::new();
-    for c in CLSID_FORWARDED {
+    for c in CLSID_FORWARDED.into_iter().chain([CLSID_LOGAN_BOUND]) {
         let mut f = core::ptr::null_mut();
         assert_eq!(unsafe { DllGetClassObject(&c, &IID_ICLASSFACTORY, &mut f) }, S_OK, "{c:x?}");
         assert_eq!(module_of(f as usize), 0, "the factory is a heap object of the console module, {c:x?}");

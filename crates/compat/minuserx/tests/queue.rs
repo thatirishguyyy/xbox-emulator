@@ -318,3 +318,10 @@ fn get_message_waits_returns_zero_for_quit_and_minus_one_for_bad_windows() {
     assert_eq!(unsafe { mux_PostMessageW(d, 0x8501, 0, 0) }, 0);
     assert_eq!(unsafe { GetLastError() }, 87);
 }
+
+#[test]
+fn host_kbm_message_set_matches_compat_common() {
+    for m in 0u32..0x400 {
+        assert_eq!(minuserx::queue::host_kbm_message(m), compat_common::host_input::kbm_message(m), "{m:#x}");
+    }
+}

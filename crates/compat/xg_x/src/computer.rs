@@ -153,7 +153,7 @@ unsafe extern "system" fn copy_from(this: *mut Computer, dst: *mut u8, plane: u3
 unsafe extern "system" fn is_tiled(this: *mut Computer, plane: u32, mip: u32, _a: usize, _b: usize) -> i32 {
     let l = &unsafe { me(this) }.layout;
     match (plane, l.mips.get(mip as usize)) {
-        (0, Some(m)) => (m.mode != crate::layout::MODE_LINEAR_GENERAL && m.mode != crate::layout::MODE_LINEAR_ALIGNED) as i32,
+        (0, Some(m)) => m.is_tiled() as i32,
         _ => 0,
     }
 }

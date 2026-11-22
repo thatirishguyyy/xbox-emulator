@@ -48,6 +48,25 @@ impl Registry {
         self.len() == 0
     }
 
+    pub fn contains(&self, token: u64) -> bool {
+        self.regs.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r.token == token)
+    }
+
+    pub fn fire_token<F>(&'static self, token: u64, f: F) -> i32
+    where
+        F: FnOnce(&Reg) + Send + 'static,
+    {
+        let found = self.regs.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|r| r.token == token).copied();
+        let Some(reg) = found else { return E_INVALIDARG };
+        unsafe {
+            super::xasync::submit(reg.queue, 1, Box::new(move |canceled| {
+                if !canceled && self.contains(reg.token) {
+                    f(&reg)
+                }
+            }))
+        }
+    }
+
     pub fn fire<F>(&self, owner: Option<usize>, f: F)
     where
         F: Fn(&Reg) + Send + Sync + Clone + 'static,

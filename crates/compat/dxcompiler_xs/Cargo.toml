@@ -3,7 +3,7 @@ name = "dxcompiler_xs"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for Xbox dxcompiler_xs.dll: DXC factory forwarded to a host dxcompiler.dll (EXE dir, TOMBOX_DXC_DIR, Windows SDK), native IDxcUtils/IDxcLibrary fallback, Xbox-only classes refused with E_NOINTERFACE, compile arguments logged."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

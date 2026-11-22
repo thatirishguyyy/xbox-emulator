@@ -3,7 +3,7 @@ name = "kernel32"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console System32\\forwarders\\kernel32.dll exports a PC kernel32 lacks: PE forwarders to the identical KernelBase / ntdll functions the console forwarders resolve to."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

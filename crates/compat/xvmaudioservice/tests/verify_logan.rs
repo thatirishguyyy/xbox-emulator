@@ -39,8 +39,7 @@ fn logan_class_and_unload_refcount_against_the_console() {
     let (ok, text) = child("factory");
     assert!(ok && text.contains("STEP OK"), "{text}");
     let (ok, text) = child("create");
-    println!("create step: success={ok}\n{text}");
-    assert!(!text.contains("CREATED"), "e782ced1 constructed without the Logan device:\n{text}");
+    assert!(ok && text.contains("CREATED") && text.contains("BUFFER OK"), "e782ced1 constructs on the emulated Logan audio pool:\n{text}");
 }
 
 #[test]
@@ -106,7 +105,27 @@ fn inner() {
     let mut o = core::ptr::null_mut();
     let chr = unsafe { vslot::<unsafe extern "system" fn(*mut c_void, *mut c_void, *const Guid, *mut *mut c_void) -> i32>(f, 3)(f, core::ptr::null_mut(), &IID_IUNKNOWN, &mut o) };
     println!("CreateInstance returned {:#010x} obj={o:?}", chr as u32);
-    if chr >= 0 && !o.is_null() {
-        println!("CREATED");
-    }
+    assert!(chr >= 0 && !o.is_null(), "CreateInstance {chr:#x}");
+    println!("CREATED");
+    let pages = 4usize;
+    let index = console_sandbox::logan::pool_alloc(pages).expect("host allocates a run in the audio pool");
+    let mut desc = [0u8; 0x30];
+    desc[0..4].copy_from_slice(&3u32.to_le_bytes());
+    let g = |g: &Guid| -> Vec<u8> { [g.data1.to_le_bytes().to_vec(), g.data2.to_le_bytes().to_vec(), g.data3.to_le_bytes().to_vec(), g.data4.to_vec()].concat() };
+    desc[8..0x18].copy_from_slice(&g(&CLSID_LOGAN_BOUND));
+    desc[0x18..0x28].copy_from_slice(&g(&Guid { data1: 0x00aa2a8a, data2: 0xacb6, data3: 0x4f3d, data4: [0x9a, 0x7e, 0xbd, 0xe7, 0x12, 0x7b, 0x43, 0x87] }));
+    desc[0x28..0x2c].copy_from_slice(&(index as u32).to_le_bytes());
+    let ihr = unsafe { vslot::<unsafe extern "system" fn(*mut c_void, *const u8) -> i32>(o, 3)(o, desc.as_ptr()) };
+    assert_eq!(ihr, S_OK, "Init with a host-allocated block");
+    let mut size = 0u32;
+    let mut va = core::ptr::null_mut::<c_void>();
+    let ghr = unsafe { vslot::<unsafe extern "system" fn(*mut c_void, *mut u32, *mut *mut c_void) -> i32>(o, 4)(o, &mut size, &mut va) };
+    println!("GetBuffer {ghr:#x} size {size:#x} va {va:?} pool {:#x} entry {:#x}", console_sandbox::logan::pool(), console_sandbox::logan::pool_entry(index as usize));
+    assert_eq!(ghr, S_OK);
+    assert_eq!(va as usize, console_sandbox::logan::pool() + index as usize * console_sandbox::logan::PAGE);
+    assert_eq!(size as usize, pages * console_sandbox::logan::PAGE);
+    assert_eq!((console_sandbox::logan::pool_entry(index as usize) >> 10) & 0xf, 2, "the guest took its reference on the run");
+    unsafe { release(o) };
+    println!("entry after release {:#x}", console_sandbox::logan::pool_entry(index as usize));
+    println!("BUFFER OK");
 }

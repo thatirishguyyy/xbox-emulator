@@ -705,7 +705,7 @@ fn bfe64(a: u64, b: u32, signed: bool) -> u64 {
     if w == 0 {
         return 0;
     }
-    let x = a >> o;
+    let x = if signed { ((a as i64) >> o) as u64 } else { a >> o };
     if w >= 64 {
         return x;
     }
@@ -1044,7 +1044,7 @@ fn vector_vop2() {
         vc(&mut c, "v_subrev_f16", &[(1, 0x1234_0000 | f2h(a)), (2, 0x9876_0000 | f2h(b))], &[vop2(0x34, 10, v(1), 2)], &[10], &[D16 | f2h(b - a)]);
     }
     for &(a, k, b) in &[(2.0f32, 3.0f32, 1.0f32), (0.5, -4.0, 0.25), (100.0, 1000.0, 0.0)] {
-        vc(&mut c, "v_madmk_f16", &[(1, 0x1111_0000 | f2h(a)), (2, f2h(b))], &[vop2(0x37, 10, v(1), 2), f2h(k)], &[10], &[D16 | f2h(a * k + b)]);
+        vc(&mut c, "v_fmamk_f16", &[(1, 0x1111_0000 | f2h(a)), (2, f2h(b))], &[vop2(0x37, 10, v(1), 2), f2h(k)], &[10], &[D16 | f2h(a * k + b)]);
     }
     for &(a, e, r) in &[(1.5f32, 3i32, 12.0f32), (1.0, -1, 0.5), (1.0, 100, f32::INFINITY), (1.0, -100, 0.0), (-3.0, 0x1_0002, -12.0)] {
         vc(&mut c, "v_ldexp_f16", &[(1, f2h(a)), (2, e as u32)], &[vop2(0x3b, 10, v(1), 2)], &[10], &[D16 | f2h(r)]);
@@ -1271,14 +1271,14 @@ pub fn shader_root(words: &[u32], root: tombox_xshader::meta::RootSig) -> Shader
 fn probe_resource_hlsl() {
     use tombox_xshader::meta::{RootParam, RootParamKind, RootRange, RootSig};
     let table = |range_type: u32, num: u32| RootParam { visibility: 5, kind: RootParamKind::Table(vec![RootRange { range_type, num, base_register: 0, space: 0, offset_in_table: u32::MAX }]) };
-    let root = RootSig { version: 2, flags: 1, params: vec![table(1, 8)], num_static_samplers: 0 };
+    let root = RootSig { version: 2, flags: 1, params: vec![table(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() };
     let mut p = Prog::new();
     p.vv(1, 4).raw(&[0xf408_0004, 0xfa00_0000, 0xe020_1005, 0x8000_0401, vop1(1, 0, v(4))]);
     println!("{}", translate(&shader_root(&p.words(), root.clone())).map(|t| t.hlsl).unwrap_or_else(|e| e));
     let mut p = Prog::new();
     p.vv(1, 4).vv(2, 9).raw(&[0xf408_0004, 0xfa00_0000, 0xe0dc_4000, 0x8000_0201, vop1(1, 0, v(2))]);
     println!("{}", translate(&shader_root(&p.words(), root.clone())).map(|t| t.hlsl).unwrap_or_else(|e| e));
-    let root2 = RootSig { version: 2, flags: 1, params: vec![table(0, 64), table(3, 16)], num_static_samplers: 0 };
+    let root2 = RootSig { version: 2, flags: 1, params: vec![table(0, 64), table(3, 16)], num_static_samplers: 0, static_samplers: Vec::new() };
     let mut p = Prog::new();
     p.vv(1, fb(0.5)).vv(2, fb(0.5)).raw(&[0xf40c_0004, 0xfa00_0000, 0xf408_0305, 0xfa00_0000, 0xf080_0f08, 0x0060_0401, vop1(1, 0, v(4))]);
     println!("{}", translate(&shader_root(&p.words(), root2)).map(|t| t.hlsl).unwrap_or_else(|e| e));
@@ -1304,7 +1304,7 @@ struct BufCase {
 }
 
 fn run_buf_cases(group: &str, cs: &[BufCase]) {
-    let root = tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0 };
+    let root = tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() };
     let mut fails = Vec::new();
     let mut all: std::collections::BTreeSet<&str> = Default::default();
     let mut bad: std::collections::BTreeSet<&str> = Default::default();
@@ -1784,7 +1784,7 @@ fn smem_data() -> Vec<u32> {
 
 #[test]
 fn scalar_smem_loads() {
-    let root = tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0 };
+    let root = tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() };
     let data = smem_data();
     let word = |slot: u32, byte: u32| data[(slot * 32 + byte / 4) as usize];
     struct C {
@@ -2116,9 +2116,8 @@ fn scalar_mode_f16_f64() {
         let pkf = vop3p(0x0e, 10, [v(1), v(2), v(3)], 0, 7, 0, 0);
         let m1 = one | 0x8000;
         vc(&mut c, "s_round_mode", &[(1, p1h * 0x10001), (2, p1h * 0x10001), (3, m1 * 0x10001)], &[rm(0, mode), pkf[0], pkf[1]], &[10], &[h_round(ph * ph - 1.0, mode) * 0x10001]);
-        let mad_h = h_round(h2f(h_round(ph * ph, mode)) as f64 - 1.0, mode);
-        vc(&mut c, "s_round_mode", &[(1, p1h), (2, p1h), (10, D16 | m1)], &[rm(0, mode), vop2(0x36, 10, v(1), 2)], &[10], &[D16 | mad_h]);
-        vc(&mut c, "s_round_mode", &[(1, p1h), (2, p1h)], &[rm(0, mode), vop2(0x38, 10, v(1), 2), m1], &[10], &[D16 | mad_h]);
+        vc(&mut c, "s_round_mode", &[(1, p1h), (2, p1h), (10, D16 | m1)], &[rm(0, mode), vop2(0x36, 10, v(1), 2)], &[10], &[w(ph * ph - 1.0)]);
+        vc(&mut c, "s_round_mode", &[(1, p1h), (2, p1h)], &[rm(0, mode), vop2(0x38, 10, v(1), 2), m1], &[10], &[w(ph * ph - 1.0)]);
         let a3 = vop3(0x164, 10, [v(2), v(4), 0]);
         let want = up(1f64.to_bits(), true);
         let t = d1f(2f64.powi(-55));
@@ -2181,8 +2180,8 @@ fn scalar_mode_f16_f64() {
     vc(&mut z, "v_madmk_f32", &[(1, tiny), (2, 0)], &[vop2(0x20, 10, v(1), 2), tiny], &[10], &[0]);
     let f3 = vop3(0x14b, 10, [v(1), v(2), v(3)]);
     vc(&mut z, "v_fma_f32", &[(1, 0x200), (2, big), (3, 0)], &f3, &[10], &[0x0380_0000]);
-    vc(&mut z, "v_mac_f16", &[(1, 1), (2, hb(2048.0)), (10, D16)], &[vop2(0x36, 10, v(1), 2)], &[10], &[D16]);
-    vc(&mut z, "v_madak_f16", &[(1, e12), (2, e12)], &[vop2(0x38, 10, v(1), 2), 0], &[10], &[D16]);
+    vc(&mut z, "v_fmac_f16", &[(1, 1), (2, hb(2048.0)), (10, D16)], &[vop2(0x36, 10, v(1), 2)], &[10], &[D16 | 0x0800]);
+    vc(&mut z, "v_fmaak_f16", &[(1, e12), (2, e12)], &[vop2(0x38, 10, v(1), 2), 0], &[10], &[D16 | 0x0001]);
     z.run_both("mad_denorm");
 }
 

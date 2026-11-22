@@ -123,3 +123,16 @@ members = [
 opt-level = 3
 debug = true
 overflow-checks = true   # keep integer-overflow checks even in release for parser safety
+
+[profile.dev-fast]
+inherits = "release"
+opt-level = 3
+debug = "line-tables-only"
+incremental = true
+codegen-units = 256
+lto = false
+
+[profile.dev-fast.build-override]
+opt-level = 0
+debug = false
+codegen-units = 256

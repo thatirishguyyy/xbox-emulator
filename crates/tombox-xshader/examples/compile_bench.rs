@@ -15,7 +15,7 @@ fn main() {
         match args[i].as_str() {
             "--fma" => {
                 fma = match args[i + 1].as_str() {
-                    "on" => Fma { preserve: true, any: true },
+                    "on" => Fma { preserve: true, any: true, hybrid: false, f2h: false },
                     "probe" => tombox_xshader::fma_probe::probe().fma,
                     _ => Fma::default(),
                 };

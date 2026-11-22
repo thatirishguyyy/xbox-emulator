@@ -3,7 +3,7 @@ name = "secur32"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console secur32.dll exports a PC secur32 lacks: the LSA performance-counter provider (Open/Collect/CloseLsaPerformanceData) ported from the console disassembly."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

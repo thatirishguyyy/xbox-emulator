@@ -4,28 +4,56 @@ use crate::xbtp;
 use core::ffi::c_void;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, Once};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
-static LOAD: Once = Once::new();
+static LOAD: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[repr(C)]
 pub struct Vt<const N: usize>([*const (); N]);
 unsafe impl<const N: usize> Sync for Vt<N> {}
 
-pub fn load_xbtp() {
-    LOAD.call_once(|| {
-        let exe = std::env::current_exe().unwrap();
-        let mut tried = Vec::new();
-        for dir in exe.ancestors().skip(1).take(6) {
-            let p = dir.join("xbtp.dll");
-            if p.exists() && xbtp::preload(&p) {
-                return;
-            }
-            tried.push(p);
+fn modified(p: &PathBuf) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+pub fn fresh_xbtp_build() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let mut builds = Vec::new();
+    let mut searched = Vec::new();
+    for dir in exe.ancestors().skip(1).take(5) {
+        let b = dir.join("build").join("xbtp");
+        searched.push(b.clone());
+        if let Ok(rd) = std::fs::read_dir(&b) {
+            builds.extend(rd.flatten().map(|e| e.path().join("out").join("xbtp.dll")).filter(|p| p.is_file()));
         }
-        panic!("xbtp.dll not found next to the test binary (build it first with cargo build -p xbtp): {tried:?}");
-    });
-    assert_ne!(xbtp::module(), 0);
+    }
+    builds.into_iter().max_by_key(modified).ok_or_else(|| format!("no build\\xbtp\\*\\out\\xbtp.dll under {searched:?}; add xbtp as a dev-dependency of the crate under test"))
+}
+
+fn load_fresh_xbtp() -> Result<(), String> {
+    let name = wide("xbtp.dll");
+    if !unsafe { GetModuleHandleW(name.as_ptr()) }.is_null() {
+        return Ok(());
+    }
+    let src = fresh_xbtp_build()?;
+    let dir = std::env::temp_dir().join(format!("xtfmsg-xbtp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let copy = dir.join("xbtp.dll");
+    std::fs::copy(&src, &copy).map_err(|e| format!("copy {} to {}: {e}", src.display(), copy.display()))?;
+    if !xbtp::preload(&copy) {
+        return Err(format!("LoadLibraryW({}) copied from {} failed: {}", copy.display(), src.display(), unsafe { GetLastError() }));
+    }
+    if xbtp::module() == 0 {
+        return Err(format!("xbtp::module() is 0 after loading {}", copy.display()));
+    }
+    Ok(())
+}
+
+pub fn load_xbtp() {
+    if let Err(e) = LOAD.get_or_init(load_fresh_xbtp) {
+        panic!("{e}");
+    }
 }
 
 pub unsafe fn new_message() -> Com {

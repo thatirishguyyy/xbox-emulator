@@ -3,7 +3,7 @@ name = "xone-exports"
 version = "0.1.0"
 edition = "2021"
 description = "Export tables (name, ordinal, status) for the Xbox One GameCore compat DLLs: build-time /EXPORT ordinals and PE export checks for tests."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xone_exports"

@@ -3,7 +3,7 @@ name = "bootshsvc"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console bootshsvc.dll (boot shell service): the svchost globals push, and ServiceMain, which runs the console's own bootshsvc.dll service code against the sandboxed console state (emulated registry/hostname, console filesystem under the emulator data dir, in-process service host)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

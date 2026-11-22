@@ -3,7 +3,7 @@ name = "minuserx"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console minuserx.dll: the console ordinal table (2534-2607), PE forwarders to the host user32 for the window/message/cursor rows, the console's own E_NOTIMPL rows reproduced exactly, and the MinUserXP hooks registry."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

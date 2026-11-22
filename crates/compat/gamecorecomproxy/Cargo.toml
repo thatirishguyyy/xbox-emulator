@@ -3,7 +3,7 @@ name = "gamecorecomproxy"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console gamecorecomproxy.dll (GameCore COM/WinRT proxy-stubs): the console 10.0.19041 MIDL proxy tables served through the PC rpcrt4 NdrDll* entry points."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

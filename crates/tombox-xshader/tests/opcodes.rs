@@ -377,7 +377,7 @@ fn second_batch_scalar_ops() {
 
 #[test]
 fn buffer_sub_dword_and_signed_atomics() {
-    let root = || Some(RootSig { version: 2, flags: 1, params: vec![table(1, 8)], num_static_samplers: 0 });
+    let root = || Some(RootSig { version: 2, flags: 1, params: vec![table(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() });
     let load_desc = [0xf408_0004u32, 0xfa00_0000];
     let cases: Vec<(&str, [u32; 2], Vec<&str>)> = vec![
         ("buffer_load_ubyte", [0xe020_1005, 0x8000_0401], vec!["& 0xffu)"]),
@@ -400,7 +400,7 @@ fn buffer_sub_dword_and_signed_atomics() {
 
 #[test]
 fn image_get_resinfo_queries_dimensions() {
-    let root = Some(RootSig { version: 2, flags: 1, params: vec![table(0, 64)], num_static_samplers: 0 });
+    let root = Some(RootSig { version: 2, flags: 1, params: vec![table(0, 64)], num_static_samplers: 0, static_samplers: Vec::new() });
     let body = [0xf40c_0004, 0xfa00_0000, 0xf038_0f08, 0x0000_0401, vop1(1, 0, v(4)), vop1(1, 1, v(7))];
     check("image_get_resinfo", &program(&body), root.clone(), &["tex0.GetDimensions(v1, t"]);
     let cube = [0xf40c_0004, 0xfa00_0000, 0xf038_0f18, 0x0000_0401, vop1(1, 0, v(4)), vop1(1, 1, v(6))];
@@ -504,6 +504,7 @@ fn snowdrop_root() -> Option<RootSig> {
             RootParam { visibility: 0, kind: RootParamKind::Descriptor { kind: 3, register: 2060, space: 0 } },
         ],
         num_static_samplers: 0,
+        static_samplers: Vec::new(),
     })
 }
 
@@ -555,7 +556,7 @@ fn hardware_register_access() {
 
 #[test]
 fn mip_level_uav_access() {
-    let root = || Some(RootSig { version: 2, flags: 1, params: vec![table(1, 64)], num_static_samplers: 0 });
+    let root = || Some(RootSig { version: 2, flags: 1, params: vec![table(1, 64)], num_static_samplers: 0, static_samplers: Vec::new() });
     let cases: Vec<(&str, Vec<u32>, Vec<&str>)> = vec![
         ("image_store_mip", vec![0xf40c_0004, 0xfa00_0000, 0xf024_0f08, 0x0000_0401], vec!["uav0_m[16] : register(u0, space4000000);", "uav0_m[NonUniformResourceIndex(min("]),
         ("image_load_mip uav", vec![0xf40c_0004, 0xfa00_0000, 0xf004_0f08, 0x0000_0401, vop1(1, 0, v(4))], vec!["uav0_m[NonUniformResourceIndex(min("]),
@@ -583,7 +584,7 @@ fn sopc_eq(a: u32, b: u32) -> u32 {
 
 #[test]
 fn image_get_lod_reads_both_lods() {
-    let root = Some(RootSig { version: 2, flags: 1, params: vec![table(0, 64), table(3, 16)], num_static_samplers: 0 });
+    let root = Some(RootSig { version: 2, flags: 1, params: vec![table(0, 64), table(3, 16)], num_static_samplers: 0, static_samplers: Vec::new() });
     let body = [
         0xf40c_0004, 0xfa00_0000,
         sop1(3, 10, 9),

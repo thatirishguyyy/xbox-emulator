@@ -21,7 +21,7 @@ const BIND_DEPTH_STENCIL: u32 = 0x40;
 const MISC_DEPTH_HTILE_TC: u32 = 0x8000;
 const MISC_64KB_SWIZZLE: u32 = 0x0800_0000;
 
-static HARDWARE_FLAG: AtomicBool = AtomicBool::new(false);
+pub(crate) static HARDWARE_FLAG: AtomicBool = AtomicBool::new(false);
 
 fn log_limited(counter: &AtomicU32, n: u32, name: &str, msg: &str) {
     if counter.fetch_add(1, Ordering::Relaxed) < n {
@@ -203,9 +203,17 @@ fn rd(p: *const u8, off: usize) -> u32 {
     unsafe { (p.add(off) as *const u32).read_unaligned() }
 }
 
-fn finish(name: &str, d: Desc, pp: *mut *mut c_void) -> i32 {
+fn finish(name: &str, d: Option<Desc>, pp: *mut *mut c_void) -> i32 {
+    finish_with(name, d, pp, compute)
+}
+
+fn finish_with(name: &str, d: Option<Desc>, pp: *mut *mut c_void, lay: fn(&Desc) -> Option<layout::Layout>) -> i32 {
     static LOG: AtomicU32 = AtomicU32::new(0);
-    match compute(&d) {
+    let Some(d) = d else {
+        log_limited(&LOG, 24, name, "descriptor rejected by validation -> E_INVALIDARG");
+        return E_INVALIDARG;
+    };
+    match lay(&d) {
         Some(l) => {
             log_limited(&LOG, 24, name, &format!("dim={} {}x{}x{} mips={} fmt={} mode={} -> size={:#x} align={:#x}", d.dimension, d.width, d.height, d.depth_or_array, l.mips.len(), d.dxgi, d.mode, l.size, l.align));
             unsafe { *pp = computer::create(l) };
@@ -225,17 +233,28 @@ fn start(desc: *const u8, pp: *mut *mut c_void) -> bool {
     !desc.is_null() && !pp.is_null()
 }
 
-fn tex1d(p: *const u8) -> Desc {
-    let mode = rd(p, 0x28);
-    Desc { dimension: 2, width: rd(p, 0) as u64, height: 1, depth_or_array: rd(p, 8), mips: rd(p, 4), dxgi: rd(p, 0xc), samples: 1, mode }
+const MISC_REJECT_2D: u32 = 0xffc5_ed0a;
+const MISC_REJECT_1D_3D: u32 = 0xffc5_6d0a;
+
+fn tex1d(p: *const u8) -> Option<Desc> {
+    if rd(p, 0x1c) & MISC_REJECT_1D_3D != 0 {
+        return None;
+    }
+    Some(Desc { dimension: 2, width: rd(p, 0) as u64, height: 1, depth_or_array: rd(p, 8), mips: rd(p, 4), dxgi: rd(p, 0xc), samples: 1, mode: rd(p, 0x28), pitch: rd(p, 0x2c) })
 }
 
-fn tex2d(p: *const u8) -> Desc {
-    Desc { dimension: 3, width: rd(p, 0) as u64, height: rd(p, 4), depth_or_array: rd(p, 0xc), mips: rd(p, 8), dxgi: rd(p, 0x10), samples: rd(p, 0x14), mode: rd(p, 0x34) }
+fn tex2d(p: *const u8) -> Option<Desc> {
+    if rd(p, 0x28) & MISC_REJECT_2D != 0 {
+        return None;
+    }
+    Some(Desc { dimension: 3, width: rd(p, 0) as u64, height: rd(p, 4), depth_or_array: rd(p, 0xc), mips: rd(p, 8), dxgi: rd(p, 0x10), samples: rd(p, 0x14), mode: rd(p, 0x34), pitch: rd(p, 0x38) })
 }
 
-fn tex3d(p: *const u8) -> Desc {
-    Desc { dimension: 4, width: rd(p, 0) as u64, height: rd(p, 4), depth_or_array: rd(p, 8), mips: rd(p, 0xc), dxgi: rd(p, 0x10), samples: 1, mode: rd(p, 0x2c) }
+fn tex3d(p: *const u8) -> Option<Desc> {
+    if rd(p, 0x20) & MISC_REJECT_1D_3D != 0 {
+        return None;
+    }
+    Some(Desc { dimension: 4, width: rd(p, 0) as u64, height: rd(p, 4), depth_or_array: rd(p, 8), mips: rd(p, 0xc), dxgi: rd(p, 0x10), samples: 1, mode: rd(p, 0x2c), pitch: rd(p, 0x30) })
 }
 
 fn resource_desc(p: *const u8) -> Option<Desc> {
@@ -258,7 +277,19 @@ fn resource_desc(p: *const u8) -> Option<Desc> {
         0x100..=0x11f => lay - 0x100,
         _ => return None,
     };
-    Some(Desc { dimension, width, height, depth_or_array: da, mips, dxgi, samples, mode })
+    if (lay == 2 && dimension == 4) || (dimension == 3 && flags & 2 != 0 && dxgi == 62) {
+        return None;
+    }
+    if (lay >= 0x100 || lay == 2) && dimension >= 3 && (mode == 6 || (matches!(mode, 7 | 16 | 17) && (dimension == 4 || layout::is_planar(dxgi)))) {
+        return None;
+    }
+    if lay >= 0x100 && dimension == 3 && flags & 2 != 0 {
+        let allowed = if has_stencil(dxgi) { matches!(mode, 0 | 5) } else { mode <= 5 || mode == 7 };
+        if !allowed {
+            return None;
+        }
+    }
+    Some(Desc { dimension, width, height, depth_or_array: da, mips, dxgi, samples, mode, pitch: 0 })
 }
 
 #[no_mangle]
@@ -290,14 +321,15 @@ pub extern "system" fn XGCreateTextureComputerWithPitch(desc: *const u8, pitch: 
     if !start(desc, pp) {
         return E_INVALIDARG;
     }
-    let Some(d) = resource_desc(desc) else {
+    let Some(mut d) = resource_desc(desc) else {
         record(M, "XGCreateTextureComputer", &format!("unsupported XG_RESOURCE_DESC dimension={} layout={:#x} -> E_INVALIDARG", rd(desc, 0), rd(desc, 0x2c)));
         return E_INVALIDARG;
     };
-    if pitch != 0 {
-        record(M, "XGCreateTextureComputerWithPitch", &format!("explicit pitch {pitch} requested; layout uses the computed GCN pitch"));
+    d.pitch = pitch;
+    if rd(desc, 0x30) & 2 != 0 && d.samples > 1 && layout::is_depth_stencil_planar(d.dxgi) {
+        return finish_with("XGCreateTextureComputer", Some(d), pp, layout::compute_depth_msaa);
     }
-    finish("XGCreateTextureComputer", d, pp)
+    finish("XGCreateTextureComputer", Some(d), pp)
 }
 
 #[no_mangle]
@@ -320,17 +352,17 @@ fn layout_into(d: Option<Desc>, out: *mut u8) -> i32 {
 
 #[no_mangle]
 pub extern "system" fn XGComputeTexture1DLayout(desc: *const u8, out: *mut u8) -> i32 {
-    layout_into((!desc.is_null()).then(|| tex1d(desc)), out)
+    layout_into(if desc.is_null() { None } else { tex1d(desc) }, out)
 }
 
 #[no_mangle]
 pub extern "system" fn XGComputeTexture2DLayout(desc: *const u8, out: *mut u8) -> i32 {
-    layout_into((!desc.is_null()).then(|| tex2d(desc)), out)
+    layout_into(if desc.is_null() { None } else { tex2d(desc) }, out)
 }
 
 #[no_mangle]
 pub extern "system" fn XGComputeTexture3DLayout(desc: *const u8, out: *mut u8) -> i32 {
-    layout_into((!desc.is_null()).then(|| tex3d(desc)), out)
+    layout_into(if desc.is_null() { None } else { tex3d(desc) }, out)
 }
 
 #[no_mangle]

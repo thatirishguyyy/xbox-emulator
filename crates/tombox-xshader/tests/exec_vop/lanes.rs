@@ -5,7 +5,7 @@ const ADDR: u32 = 251;
 pub const WAVE: usize = 32;
 
 pub fn lane_root() -> tombox_xshader::meta::RootSig {
-    tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0 }
+    tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() }
 }
 
 pub fn lane_shader(words: &[u32]) -> ShaderExtract {

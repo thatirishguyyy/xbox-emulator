@@ -80,8 +80,22 @@ fn xgamestreaming_slots_follow_the_console_runtime_without_clients() {
 
         hide(o);
 
+        assert_eq!(streaming::registration_count(), 1);
+        let mut t3 = 0u64;
+        assert_eq!(reg_state(o, 0, core::ptr::null_mut(), state, &mut t3), 0);
+        assert_eq!(t3, t2 + 1);
+        assert_eq!(streaming::registration_count(), 2);
         uninit(o);
+        assert_eq!(streaming::registration_count(), 0);
         assert!(!unreg_state(o, t2, true));
         assert_eq!(dims(o, 7, &mut h, &mut v), streaming::E_GAMESTREAMING_NOT_INITIALIZED);
+        assert_eq!(init(o), 0);
+        assert_eq!(streaming::registration_count(), 0);
+        let mut t4 = 0u64;
+        assert_eq!(reg_state(o, 0, core::ptr::null_mut(), state, &mut t4), 0);
+        assert_eq!(t4, t3 + 1);
+        assert_eq!(streaming::registration_count(), 1);
+        uninit(o);
+        assert_eq!(streaming::registration_count(), 0);
     }
 }

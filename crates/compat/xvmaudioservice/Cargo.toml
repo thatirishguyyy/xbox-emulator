@@ -2,8 +2,8 @@
 name = "xvmaudioservice"
 version = "0.1.0"
 edition = "2021"
-description = "Compat DLL for the console XVMAudioService.dll (Gamecore XVM Audio Service): DllGetActivationFactory ported from the console body; DllGetClassObject and DllCanUnloadNow run the console DLL with its OS imports routed to console-sandbox, except the Logan-bound class."
-license = "MIT OR Apache-2.0"
+description = "Compat DLL for the console XVMAudioService.dll (Gamecore XVM Audio Service): DllGetActivationFactory ported from the console body; DllGetClassObject and DllCanUnloadNow run the console DLL with its OS imports routed to console-sandbox; the Logan-bound class runs on the emulated acpi_hal Logan audio pool."
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

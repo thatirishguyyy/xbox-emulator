@@ -434,6 +434,7 @@ macro_rules! fwd {
 
 unsafe extern "system" fn w_topology(this: *mut c_void, t: u32) {
     rec(this, |s| s.topology = Some(t));
+    crate::present_probe::note_topology(t);
     fwd!(X_TOPOLOGY, fn(u32), this, t)
 }
 

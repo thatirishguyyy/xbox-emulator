@@ -77,6 +77,23 @@ pub unsafe fn register(res: *mut c_void, desc: &[u8], init_state: u32) {
     STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(res as usize, init_state);
 }
 
+pub unsafe fn register_view_target(res: *mut c_void, init_state: u32) {
+    if !enabled() || res.is_null() || TARGETS.lock().unwrap().iter().any(|t| t.res == res as usize) {
+        return;
+    }
+    let mut d = [0u8; 0x38];
+    vcall!(res, 10, fn(*mut u8) -> *mut u8, d.as_mut_ptr());
+    let before = TARGETS.lock().unwrap().len();
+    register(res, &d, init_state);
+    let t = TARGETS.lock().unwrap();
+    if t.len() > before {
+        let u = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap());
+        record("d3d12_xs", "rtcap", &format!(
+            "view target #{:03} {res:p} {}x{} fmt={} flags={:#x} was not created through a tracked path; registered from its view (assumed state {init_state:#x}, placed={})",
+            before, u64::from_le_bytes(d[0x10..0x18].try_into().unwrap()), u(0x18), u(0x20), u(0x30), crate::placed::lookup(res).is_some()));
+    }
+}
+
 pub fn state_of(res: usize) -> Option<u32> {
     STATES.lock().unwrap().as_ref().and_then(|m| m.get(&res).copied())
 }
@@ -605,6 +622,27 @@ pub fn on_draw(list: usize, kind: u8) -> bool {
         }
         true
     })
+}
+
+pub fn frame_draws() -> Vec<crate::present_probe::Draw> {
+    with_trace(|t| t.draws.iter().map(|((_, rtv, dsv, kind), c)| crate::present_probe::Draw { rtv: rtv.clone(), dsv: *dsv, kind: *kind, count: *c }).collect())
+}
+
+pub fn label(r: usize) -> String {
+    if r == 0 {
+        return "-".into();
+    }
+    if r == usize::MAX {
+        return "?".into();
+    }
+    let d32 = |d: &[u8], o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap());
+    if let Some(t) = TARGETS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|t| t.res == r) {
+        return format!("rt#{:03} {}x{} fmt={}", t.order, u64::from_le_bytes(t.desc[0x10..0x18].try_into().unwrap()), d32(&t.desc, 0x18), d32(&t.desc, 0x20));
+    }
+    match crate::placed::lookup(r as *mut c_void) {
+        Some(p) => format!("placed {r:#x} {}x{} fmt={}", p.width(), p.height(), p.format()),
+        None => format!("res {r:#x} (not a registered RT)"),
+    }
 }
 
 /// Forget the draws recorded so far (called at every present).

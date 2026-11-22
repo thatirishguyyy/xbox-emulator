@@ -4,7 +4,8 @@ use core::ffi::c_void;
 use core::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use xtfmsg::sys::{hr_from_win32, E_FAIL, HANDLE, HRESULT, S_OK};
+use crate::profile::{self, MonitorFlow, Profile};
+use xtfmsg::sys::{hr_from_win32, E_FAIL, E_INVALIDARG, HANDLE, HRESULT, S_OK};
 
 pub const DEBUGMONITOR_CPP: &str = "xbox\\devex\\xtf\\dll\\debugmonitor\\debugmonitor.cpp";
 pub const PDEM_CPP: &str = "xbox\\devex\\xtf\\dll\\debugmonitor\\processdebugeventmonitor.cpp";
@@ -151,6 +152,7 @@ pub struct ProcessMonitor {
     pub break_on_exception: AtomicBool,
     pub force_all: AtomicBool,
     pub detach_count: AtomicU32,
+    pub profile: &'static Profile,
 }
 
 unsafe impl Send for ProcessMonitor {}
@@ -158,6 +160,10 @@ unsafe impl Sync for ProcessMonitor {}
 
 impl ProcessMonitor {
     pub fn new(pid: u32) -> ProcessMonitor {
+        ProcessMonitor::with_profile(pid, profile::current())
+    }
+
+    pub fn with_profile(pid: u32, profile: &'static Profile) -> ProcessMonitor {
         let ring: Vec<Mutex<Entry>> = (0..RING_ENTRIES).map(|_| Mutex::new(Entry::new())).collect();
         let mut m = ProcessMonitor {
             active: AtomicBool::new(false),
@@ -177,6 +183,7 @@ impl ProcessMonitor {
             break_on_exception: AtomicBool::new(false),
             force_all: AtomicBool::new(false),
             detach_count: AtomicU32::new(0),
+            profile,
         };
         unsafe {
             let e = CreateEventW(null_mut(), 0, 0, core::ptr::null());
@@ -198,10 +205,10 @@ impl ProcessMonitor {
 
     pub fn add_debug_client(self: &Arc<Self>, filter_flags: u32, session: usize) -> Arc<DebugClient> {
         let client = Arc::new(DebugClient::new(self, filter_flags, session));
-        chk(PDEM_CPP, "ProcessDebugEventMonitor::AddDebugClient", 151, "pDebugClient", S_OK, "");
+        chk(PDEM_CPP, "ProcessDebugEventMonitor::AddDebugClient", self.profile.add_client(151), "pDebugClient", S_OK, "");
         let mut clients = lock(&self.clients);
         clients.push(client.clone());
-        chk(PDEM_CPP, "ProcessDebugEventMonitor::AddDebugClient", 174, "m_debugClients.Add(debugClient)", S_OK, "");
+        chk(PDEM_CPP, "ProcessDebugEventMonitor::AddDebugClient", self.profile.add_client(174), "m_debugClients.Add(debugClient)", S_OK, "");
         let any = clients.iter().any(|c| c.filter_flags & 1 != 0);
         self.break_on_exception.store(any, Ordering::SeqCst);
         client
@@ -255,7 +262,7 @@ impl ProcessMonitor {
         self.attach_done.store(true, Ordering::SeqCst);
         SetEvent(self.event_ready);
         let mut hr = self.attach_result.load(Ordering::SeqCst);
-        chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", 387, "m_attachResult", hr, "");
+        chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", self.profile.pdem(387), "m_attachResult", hr, "");
         'run: {
             if hr < 0 {
                 break 'run;
@@ -267,7 +274,7 @@ impl ProcessMonitor {
                     let e = GetLastError();
                     if e != ERROR_SEM_TIMEOUT {
                         hr = hr_from_win32(e);
-                        chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", 402, "dwError", hr, "");
+                        chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", self.profile.pdem(402), "dwError", hr, "");
                         if e != 0 {
                             break 'run;
                         }
@@ -298,7 +305,7 @@ impl ProcessMonitor {
                 };
                 if line != 0 {
                     hr = r;
-                    chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", line, expr, hr, "");
+                    chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", self.profile.pdem(line), expr, hr, "");
                     if hr < 0 {
                         break 'run;
                     }
@@ -314,7 +321,7 @@ impl ProcessMonitor {
                         }
                     } else {
                         hr = hr_last_error();
-                        chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", 479, "HRESULT_FROM_WIN32(::GetLastError())", hr, "");
+                        chk(PDEM_CPP, "ProcessDebugEventMonitor::WorkerThread", self.profile.pdem(479), "HRESULT_FROM_WIN32(::GetLastError())", hr, "");
                         if hr < 0 {
                             break 'run;
                         }
@@ -362,7 +369,7 @@ impl ProcessMonitor {
                 entry.address = ev.u64_at(0x20);
                 (433, "OnCreateThreadDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", Self::cont(ev.pid, ev.tid, DBG_CONTINUE))
             }
-            CREATE_PROCESS_DEBUG_EVENT => (437, "OnCreateProcessDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", on_create_process(ev, entry)),
+            CREATE_PROCESS_DEBUG_EVENT => (437, "OnCreateProcessDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", on_create_process(self.profile, ev, entry)),
             EXIT_THREAD_DEBUG_EVENT => {
                 entry.data1 = ev.u32_at(0x10);
                 (441, "OnExitThreadDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", Self::cont(ev.pid, ev.tid, DBG_CONTINUE))
@@ -371,12 +378,12 @@ impl ProcessMonitor {
                 entry.data1 = ev.u32_at(0x10);
                 (445, "OnExitProcessDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", Self::cont(ev.pid, ev.tid, DBG_CONTINUE))
             }
-            LOAD_DLL_DEBUG_EVENT => (449, "OnLoadDllDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", on_load_dll(ev, entry)),
+            LOAD_DLL_DEBUG_EVENT => (449, "OnLoadDllDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", on_load_dll(self.profile, ev, entry)),
             UNLOAD_DLL_DEBUG_EVENT => {
                 entry.address = ev.u64_at(0x10);
                 (453, "OnUnloadDllDebugEvent(dbgEvent, m_eventBuffer[m_writeHead])", Self::cont(ev.pid, ev.tid, DBG_CONTINUE))
             }
-            OUTPUT_DEBUG_STRING_EVENT => (457, "OnOutputDebugStringEvent(dbgEvent, m_eventBuffer[m_writeHead])", on_output_debug_string(ev, entry)),
+            OUTPUT_DEBUG_STRING_EVENT => (457, "OnOutputDebugStringEvent(dbgEvent, m_eventBuffer[m_writeHead])", on_output_debug_string(self.profile, ev, entry)),
             RIP_EVENT => {
                 entry.data1 = ev.u32_at(0x10);
                 entry.data2 = ev.u32_at(0x14);
@@ -419,13 +426,13 @@ unsafe fn close_file(h: u64) -> HRESULT {
     S_OK
 }
 
-pub unsafe fn on_create_process(ev: &DebugEvent, entry: &mut Entry) -> HRESULT {
+pub unsafe fn on_create_process(p: &Profile, ev: &DebugEvent, entry: &mut Entry) -> HRESULT {
     entry.address = ev.u64_at(0x40);
     let hr = close_file(ev.u64_at(0x10));
     if ContinueDebugEvent(ev.pid, ev.tid, DBG_CONTINUE) == 0 {
         return hr_last_error_or_fail();
     }
-    chk(PDEM_CPP, "ProcessDebugEventMonitor::OnCreateProcessDebugEvent", 594, "hrCloseFile", hr, "");
+    chk(PDEM_CPP, "ProcessDebugEventMonitor::OnCreateProcessDebugEvent", p.pdem(594), "hrCloseFile", hr, "");
     hr
 }
 
@@ -467,7 +474,7 @@ pub unsafe fn read_image_name(h: HANDLE, base: u64, image_name: u64, out: &mut [
     read(h, base.wrapping_add(name_rva as u64), out.as_mut_ptr() as *mut c_void, MESSAGE_BYTES)
 }
 
-pub unsafe fn on_load_dll(ev: &DebugEvent, entry: &mut Entry) -> HRESULT {
+pub unsafe fn on_load_dll(p: &Profile, ev: &DebugEvent, entry: &mut Entry) -> HRESULT {
     entry.address = ev.u64_at(0x18);
     let image_name = ev.u64_at(0x28);
     entry.data1 = if image_name != 0 { ev.u16_at(0x30) as u32 } else { 0 };
@@ -485,16 +492,16 @@ pub unsafe fn on_load_dll(ev: &DebugEvent, entry: &mut Entry) -> HRESULT {
     if ContinueDebugEvent(ev.pid, ev.tid, DBG_CONTINUE) == 0 {
         return hr_last_error_or_fail();
     }
-    chk(PDEM_CPP, "ProcessDebugEventMonitor::OnLoadDllDebugEvent", 795, "hrCloseFile", hr, "");
+    chk(PDEM_CPP, "ProcessDebugEventMonitor::OnLoadDllDebugEvent", p.pdem(795), "hrCloseFile", hr, "");
     hr
 }
 
-pub unsafe fn on_output_debug_string(ev: &DebugEvent, entry: &mut Entry) -> HRESULT {
+pub unsafe fn on_output_debug_string(p: &Profile, ev: &DebugEvent, entry: &mut Entry) -> HRESULT {
     let mut hr = S_OK;
     let h = OpenProcess(PROCESS_VM_READ, 0, ev.pid);
     if h == INVALID_HANDLE_VALUE {
         hr = hr_last_error();
-        chk(PDEM_CPP, "ProcessDebugEventMonitor::OnOutputDebugStringEvent", 836, "HRESULT_FROM_WIN32(GetLastError())", hr, "");
+        chk(PDEM_CPP, "ProcessDebugEventMonitor::OnOutputDebugStringEvent", p.pdem(836), "HRESULT_FROM_WIN32(GetLastError())", hr, "");
     }
     if hr >= 0 {
         let unicode = ev.u16_at(0x18);
@@ -563,7 +570,85 @@ impl DebugMonitor {
             .collect()
     }
 
-    pub unsafe fn add_monitor_client(&self, pid: u32, filter_flags: u32, session: usize) -> Result<Arc<DebugClient>, HRESULT> {
+    pub unsafe fn monitor_process(&self, p: &'static Profile, pid: u32, filter_flags: u32, session: usize) -> HRESULT {
+        if session == 0 {
+            return E_INVALIDARG;
+        }
+        match p.flow {
+            MonitorFlow::AddMonitorClient => match self.add_monitor_client(p, pid, filter_flags, session) {
+                Err(hr) => {
+                    chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 173, "AddMonitorClient(pid, filterFlags, session, &pDebugClient)", hr, "");
+                    hr
+                }
+                Ok(client) => {
+                    chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 173, "AddMonitorClient(pid, filterFlags, session, &pDebugClient)", S_OK, "");
+                    let hr = client.monitor();
+                    chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 176, "pDebugClient->Monitor()", hr, "");
+                    hr
+                }
+            },
+            MonitorFlow::AddProcessMonitor => self.monitor_process_separate_add(p, pid, filter_flags, session),
+        }
+    }
+
+    pub fn remove_process_monitor(&self, monitor: &Arc<ProcessMonitor>) -> HRESULT {
+        let mut monitors = lock(&self.monitors);
+        match monitors.iter().position(|m| Arc::ptr_eq(m, monitor)) {
+            Some(i) => {
+                monitors.remove(i);
+                S_OK
+            }
+            None => {
+                chk(DEBUGMONITOR_CPP, "DebugMonitor::RemoveProcessMonitor", 82, "E_NOT_SET", E_NOT_SET, "Process monitor could not be removed.");
+                E_NOT_SET
+            }
+        }
+    }
+
+    pub fn add_process_monitor(&self, monitor: &Arc<ProcessMonitor>) -> HRESULT {
+        lock(&self.monitors).push(monitor.clone());
+        chk(DEBUGMONITOR_CPP, "DebugMonitor::AddProcessMonitor", 60, "m_processMonitors.Add(pMonitor)", S_OK, "");
+        S_OK
+    }
+
+    unsafe fn monitor_process_separate_add(&self, p: &'static Profile, pid: u32, filter_flags: u32, session: usize) -> HRESULT {
+        let mut monitor = self.find(pid);
+        if let Some(m) = monitor.clone() {
+            if !m.active.load(Ordering::SeqCst) {
+                let hr = self.remove_process_monitor(&m);
+                chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 114, "RemoveProcessMonitor(pMonitor)", hr, "");
+                if hr < 0 {
+                    return hr;
+                }
+                m.destroy();
+                monitor = None;
+            }
+        }
+        let (monitor, created) = match monitor {
+            Some(m) => (m, false),
+            None => {
+                let m = Arc::new(ProcessMonitor::with_profile(pid, p));
+                chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 122, "pMonitor = new ProcessDebugEventMonitor(pid)", S_OK, "");
+                let hr = self.add_process_monitor(&m);
+                chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 123, "AddProcessMonitor(pMonitor)", hr, "");
+                (m, true)
+            }
+        };
+        let client = monitor.add_debug_client(filter_flags, session);
+        chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 127, "pMonitor->AddDebugClient(filterFlags, session, &pDebugClient)", S_OK, "");
+        if created {
+            let hr = monitor.start_monitoring();
+            chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 131, "pMonitor->StartMonitoring()", hr, "");
+            if hr < 0 {
+                return hr;
+            }
+        }
+        let hr = client.monitor();
+        chk(DEBUGMONITOR_CPP, "DebugMonitor::MonitorProcess", 135, "pDebugClient->Monitor()", hr, "");
+        hr
+    }
+
+    pub unsafe fn add_monitor_client(&self, p: &'static Profile, pid: u32, filter_flags: u32, session: usize) -> Result<Arc<DebugClient>, HRESULT> {
         let mut monitors = lock(&self.monitors);
         let mut existing = None;
         if let Some(i) = monitors.iter().position(|m| m.pid == pid) {
@@ -577,7 +662,7 @@ impl DebugMonitor {
         let (monitor, created) = match existing {
             Some(m) => (m, false),
             None => {
-                let m = Arc::new(ProcessMonitor::new(pid));
+                let m = Arc::new(ProcessMonitor::with_profile(pid, p));
                 chk(DEBUGMONITOR_CPP, "DebugMonitor::AddMonitorClient", 85, "pMonitor = new ProcessDebugEventMonitor(pid)", S_OK, "");
                 let hr = m.init_result;
                 chk(DEBUGMONITOR_CPP, "DebugMonitor::AddMonitorClient", 86, "pMonitor->GetInitResult()", hr, "");

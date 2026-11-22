@@ -21,11 +21,15 @@ extern "system" {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Tm(pub(super) usize);
+pub(super) struct Tm(pub(super) usize, pub(super) usize, pub(super) &'static str);
 
 impl Tm {
     pub(super) fn rva(&self, rva: usize) -> usize {
         self.0 + rva
+    }
+
+    pub(super) fn sc(&self) -> usize {
+        self.0 + self.1
     }
 
     pub(super) fn f(&self, name: &str) -> usize {
@@ -42,15 +46,30 @@ impl Tm {
     }
 }
 
+pub(super) const BUILDS: [(&str, usize); 3] = [("Trackmania", 0x2d4d0), ("XDefiant", 0x2c4d0), ("Fortnite", 0x2c4c0)];
+
+pub(super) fn build_path(title: &str) -> std::path::PathBuf {
+    let ex = std::path::Path::new(r"D:\xbox-pc-port\games").join(title).join("extracted");
+    let tail = ["EmbeddedXvd", "Windows", "System32", "xg_x.dll"];
+    let mut cands = vec![tail.iter().fold(ex.clone(), |p, s| p.join(s))];
+    if let Ok(rd) = std::fs::read_dir(&ex) {
+        for e in rd.flatten() {
+            cands.push(tail.iter().fold(e.path(), |p, s| p.join(s)));
+        }
+    }
+    cands.into_iter().find(|p| p.is_file()).unwrap_or_else(|| panic!("console xg_x.dll of {title} not found under {}; the DCC oracles need it", ex.display()))
+}
+
 pub(super) fn console() -> Option<(Oracle, Tm)> {
-    let or = oracle()?;
-    let dll = xone_exports::reference_dlls("xg_x.dll").into_iter().find(|p| p.to_string_lossy().contains("Trackmania"))?;
+    let or = oracle().expect("console oracle xg_x.dll or xmem.dll missing; the DCC oracles need them");
+    let title = std::env::var("XGX_DCC_BUILD").unwrap_or_else(|_| "Trackmania".into());
+    let &(name, sc) = BUILDS.iter().find(|b| b.0 == title).unwrap_or_else(|| panic!("unknown XGX_DCC_BUILD {title}"));
+    let dll = build_path(name);
     let w: Vec<u16> = dll.to_string_lossy().encode_utf16().chain(Some(0)).collect();
     let h = unsafe { LoadLibraryW(w.as_ptr()) } as usize;
-    if h == 0 || h == or.0 as usize {
-        return None;
-    }
-    let tm = Tm(h);
+    assert!(h != 0, "LoadLibrary failed for {}", dll.display());
+    assert!(h != or.0 as usize, "{} resolved to the oracle module already loaded; the DCC oracles need the {name} build itself", dll.display());
+    let tm = Tm(h, sc, name);
     let f: extern "system" fn(i32) = unsafe { core::mem::transmute(tm.f("XGSetHardwareVersion")) };
     f(0);
     Some((or, tm))
@@ -108,7 +127,7 @@ impl<'a> Con<'a> {
             self.set_surf(i, &d.s[i]);
         }
         let s = d.sc;
-        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), self.or.rva(0x2d4d0) as *mut u8, 64) };
+        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), self.or.sc() as *mut u8, 64) };
     }
 
     pub(super) fn f(&self, rva: usize) -> usize {
@@ -122,7 +141,7 @@ pub(super) fn same(d: &Dcc, c: &Con, what: &str) {
         assert_eq!(d.s[i], c.get_surf(i), "{what}: surface {i}");
     }
     let mut cs = [0u8; 64];
-    unsafe { core::ptr::copy_nonoverlapping(c.or.rva(0x2d4d0) as *const u8, cs.as_mut_ptr(), 64) };
+    unsafe { core::ptr::copy_nonoverlapping(c.or.sc() as *const u8, cs.as_mut_ptr(), 64) };
     assert_eq!(d.sc, cs, "{what}: scratch");
 }
 

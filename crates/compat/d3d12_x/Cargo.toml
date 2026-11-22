@@ -3,7 +3,7 @@ name = "d3d12_x"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for Xbox One GameCore d3d12_x.dll: forwards device creation to the emulator's d3d12_xs.dll at run time, root-signature and debug entry points to host d3d12.dll, ESRAM mapping onto ordinary committed memory."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

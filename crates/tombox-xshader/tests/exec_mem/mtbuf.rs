@@ -210,7 +210,7 @@ fn pack_ref(v: u32, bits: u32, n: N) -> Option<u64> {
             if x.is_nan() { 0 } else { (x.clamp(0.0, 1.0) * mx as f32).round_ties_even() as u64 }
         }
         N::Sn => {
-            if x.is_nan() { 0 } else { ((x.clamp(-1.0, 1.0) * mk(bits - 1) as f32).round_ties_even() as i64 as u64) & mx }
+            if x.is_nan() { 0 } else { ((x.clamp(-1.0, 1.0) * mk(bits - 1) as f32).round() as i64 as u64) & mx }
         }
         N::Ui => (v as u64).min(mx),
         N::Si if bits == 32 => v as u64,
@@ -241,12 +241,7 @@ fn store_case(f: u32, n: u32, at: u32, offen: bool) -> Option<CsCase> {
         let (o, b) = fields[k as usize];
         packed |= (pack_ref(vals(num, b, k), b, num)? as u128) << o;
     }
-    let end = fields[w_n as usize - 1].0 + fields[w_n as usize - 1].1;
-    if w_n < fields.len() as u32 && (end % 8 != 0 || fields.iter().any(|&(o, b)| o % 8 != 0 || b % 8 != 0)) {
-        return None;
-    }
-    let wl = if w_n < fields.len() as u32 { end / 8 } else { len };
-    for i in 0..wl as usize {
+    for i in 0..len as usize {
         bytes[at as usize + i] = (packed >> (8 * i)) as u8;
     }
     let op = mtbuf(4 + n - 1, f, if offen { 0 } else { at }, offen, 1, 10, 0x80);
@@ -278,9 +273,60 @@ fn mtbuf_store_formats() {
     run_cs_cases("mtbuf_store", &cs);
 }
 
+fn hw_store(f: u32, n: u32, vals: [u32; 4], want: &[u8]) -> CsCase {
+    let op = mtbuf(4 + n - 1, f, 8, false, 1, 10, 0x80);
+    let mut w = prog(&[vop1(1, 1, LIT), 8]);
+    for k in 0..n {
+        w.extend_from_slice(&[vop1(1, 10 + k, LIT), vals[k as usize]]);
+    }
+    w.extend_from_slice(&op);
+    w.push(S_ENDPGM);
+    let mut bytes = vec![0xaau8; 64];
+    bytes[8..8 + want.len()].copy_from_slice(want);
+    let mem = (0..16usize).map(|i| (i, u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap()))).collect();
+    let names = ["tbuffer_store_format_x", "tbuffer_store_format_xy", "tbuffer_store_format_xyz", "tbuffer_store_format_xyzw"];
+    CsCase { m: names[n as usize - 1], op: op.to_vec(), words: w, threads: 1, mem, init: vec![0xaaaa_aaaa; 16] }
+}
+
+#[test]
+fn mtbuf_partial_store_zero_fills_like_rdna2() {
+    let q = [0.25f32, 0.5, 0.75, 1.0].map(f32::to_bits);
+    let rows: [(u32, [&[u8]; 4]); 4] = [
+        (56, [&[0x40, 0, 0, 0], &[0x40, 0x80, 0, 0], &[0x40, 0x80, 0xbf, 0], &[0x40, 0x80, 0xbf, 0xff]]),
+        (60, [&[0xff, 0, 0, 0], &[0xff, 0xff, 0, 0], &[0xff, 0xff, 0xff, 0], &[0xff, 0xff, 0xff, 0xff]]),
+        (65, [&[0, 0x40, 0, 0, 0, 0, 0, 0], &[0, 0x40, 0, 0x80, 0, 0, 0, 0], &[0, 0x40, 0, 0x80, 0xff, 0xbf, 0, 0], &[0, 0x40, 0, 0x80, 0xff, 0xbf, 0xff, 0xff]]),
+        (44, [&[0x01, 0, 0, 0], &[0x01, 0x08, 0, 0], &[0x01, 0xf8, 0x2f, 0], &[0x01, 0xf8, 0xef, 0xff]]),
+    ];
+    let mut cs = Vec::new();
+    for (f, want) in rows {
+        for n in 1..=4u32 {
+            cs.push(hw_store(f, n, q, want[n as usize - 1]));
+        }
+    }
+    run_cs_cases("mtbuf_partial_rdna2", &cs);
+}
+
+#[test]
+fn mtbuf_snorm2_ties_round_away() {
+    let mut cs = Vec::new();
+    for (f, at) in [(45u32, 0usize), (51, 3)] {
+        let (fields, _, _) = fmt_ref(f);
+        for (x, r) in [(0.5f32, 1u64), (-0.5, 3), (0.49999997, 0), (-0.75, 3)] {
+            let mut vals = [1.0f32.to_bits(); 4];
+            vals[at] = x.to_bits();
+            let mut packed = 0u64;
+            for (k, &(o, b)) in fields.iter().enumerate() {
+                packed |= (if k == at { r } else { mk(b - 1) }) << o;
+            }
+            cs.push(hw_store(f, 4, vals, &(packed as u32).to_le_bytes()));
+        }
+    }
+    run_cs_cases("mtbuf_snorm2_ties", &cs);
+}
+
 #[test]
 fn mtbuf_refuses_unlowered() {
-    for (op, f) in [(4u32, 3u32), (4, 30), (8, 75), (12, 9), (4, 44), (0, 0), (0, 78)] {
+    for (op, f) in [(4u32, 3u32), (4, 36), (8, 75), (12, 9), (0, 0), (0, 78)] {
         let mut w = prog(&[vop1(1, 1, ic(0)), vop1(1, 10, ic(0))]);
         w.extend_from_slice(&mtbuf(op, f, 0, true, 1, 10, 0x80));
         w.push(S_ENDPGM);
@@ -440,13 +486,8 @@ fn store_case_d16(f: u32, n: u32, at: u32, offen: bool) -> Result<CsCase, Vec<u3
             None => return Err(w),
         }
     }
-    let end = fields[w_n as usize - 1].0 + fields[w_n as usize - 1].1;
-    if w_n < nf && (end % 8 != 0 || fields.iter().any(|&(o, b)| o % 8 != 0 || b % 8 != 0)) {
-        return Err(w);
-    }
-    let wl = if w_n < nf { end / 8 } else { len };
     let mut bytes = bytes_of(&data());
-    for i in 0..wl as usize {
+    for i in 0..len as usize {
         bytes[at as usize + i] = (packed >> (8 * i)) as u8;
     }
     let mem = (0..16usize).map(|i| (i, u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap()))).collect();

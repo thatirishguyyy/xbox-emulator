@@ -3,7 +3,7 @@ name = "mfh264enc"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console MFH264Enc.dll: console DllMain, and the console DllGetClassObject/MFDllGetClassObject body (one function) taken from the PC H.264 encoder MFT (System32 mfh264enc.dll)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

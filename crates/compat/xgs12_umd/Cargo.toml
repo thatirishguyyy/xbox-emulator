@@ -3,7 +3,7 @@ name = "xgs12_umd"
 version = "0.1.0"
 edition = "2021"
 description = "Shared implementation of the Xbox xgs12*.dll graphics user-mode driver entry points, mapped onto the emulator d3d12_xs layer."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xgs12_umd"

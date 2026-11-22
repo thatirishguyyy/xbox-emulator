@@ -3,7 +3,7 @@ name = "ndr-proxy"
 version = "0.1.0"
 edition = "2021"
 description = "Shared runtime for console MIDL proxy/stub DLLs: relocates the console's generated proxy tables (format strings, vtables, stub descriptors) taken from the console DLL, binds their rpcrt4/combase imports on the PC, and serves the five standard proxy DLL exports through the PC rpcrt4 Ndr* entry points."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "ndr_proxy"

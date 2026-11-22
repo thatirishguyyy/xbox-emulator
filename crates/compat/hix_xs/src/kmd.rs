@@ -62,6 +62,11 @@ pub fn armed() -> Option<u32> {
     (ARMED.load(Ordering::Acquire) != 0).then(|| ARM_VALUE.load(Ordering::Acquire))
 }
 
+pub fn disarm() {
+    ARMED.store(0, Ordering::Release);
+    ARM_VALUE.store(0, Ordering::Release);
+}
+
 pub fn last_command() -> Option<u32> {
     let c = LAST_CMD.load(Ordering::Acquire);
     (c != u32::MAX).then_some(c)

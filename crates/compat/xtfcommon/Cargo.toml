@@ -3,7 +3,7 @@ name = "xtfcommon"
 version = "0.1.0"
 edition = "2021"
 description = "Shared runtime pieces for the console Xbox Tools Framework (xtf*) compat DLLs: Win32/UCRT bindings, MSVC STL object layouts, benaphores, UCRT printf bridging and PE export-table checks."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xtfcommon"

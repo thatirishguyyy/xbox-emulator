@@ -47,10 +47,10 @@ pub(crate) fn fresh(f: usize, sc: &Scratch) -> Dcc {
     d
 }
 
-fn commit(sc: &mut Scratch, runs: &[Dcc]) {
+fn commit(sc: &mut Scratch, runs: &[Dcc], poisoned: bool) {
     let mut unk = 0u64;
     for i in 0..64 {
-        if runs.iter().any(|r| r.sc[i] != runs[0].sc[i]) {
+        if poisoned || runs.iter().any(|r| r.sc[i] != runs[0].sc[i]) {
             unk |= 1 << i;
         }
     }
@@ -83,23 +83,58 @@ pub(crate) fn setup_runs(format: i32, tile_mode: i32, params: [u32; 2], sc: &Scr
     Ok(runs)
 }
 
-pub(crate) fn decode_blocks(runs: &mut [Dcc], src: &[u8], meta: &[u8], dst: &mut [u8], notes: &mut Vec<String>) -> Outcome {
+pub(crate) struct Blocks {
+    pub(crate) out: Outcome,
+    pub(crate) poisoned: bool,
+}
+
+fn first(stop: &mut Option<(usize, String)>, block: usize, why: String) {
+    if stop.is_none() {
+        *stop = Some((block, why));
+    }
+}
+
+fn outcome(stop: Option<(usize, String)>) -> Outcome {
+    match stop {
+        None => Outcome::Done,
+        Some((block, why)) => Outcome::Stopped { block, why },
+    }
+}
+
+const DIVERGED: &str = "the output takes bytes the console never wrote this call (uninitialised heap surfaces or codec object stack)";
+
+pub(crate) fn decode_all(runs: &mut [Dcc], src: &[u8], meta: &[u8], dst: &mut [u8], notes: &mut Vec<String>) -> Blocks {
+    let mut stop = None;
+    let mut live = vec![true; runs.len()];
     for i in 0..meta.len() {
-        for d in runs.iter_mut() {
+        for (k, d) in runs.iter_mut().enumerate() {
+            if !live[k] {
+                continue;
+            }
             d.s[1].copy_from_slice(&src[i * 256..i * 256 + 256]);
             d.p(0x34, meta[i] as u32);
             d.msg.clear();
             if let Err(e) = dec::run(d) {
-                return Outcome::Stopped { block: i, why: why(e) };
+                live[k] = false;
+                first(&mut stop, i, why(e));
             }
         }
-        if runs.iter().any(|r| r.s[0] != runs[0].s[0]) {
-            return Outcome::Stopped { block: i, why: "the output takes bytes the console never wrote this call (uninitialised heap surfaces or codec object stack)".into() };
+        if live.iter().any(|l| !l) {
+            break;
         }
-        notes.extend(runs[0].msg.drain(..));
-        dst[i * 256..i * 256 + 256].copy_from_slice(&runs[0].s[0]);
+        if runs.iter().any(|r| r.s[0] != runs[0].s[0]) {
+            first(&mut stop, i, DIVERGED.into());
+        }
+        if stop.is_none() {
+            notes.extend(runs[0].msg.drain(..));
+            dst[i * 256..i * 256 + 256].copy_from_slice(&runs[0].s[0]);
+        }
     }
-    Outcome::Done
+    Blocks { poisoned: live.iter().any(|l| !l), out: outcome(stop) }
+}
+
+pub(crate) fn decode_blocks(runs: &mut [Dcc], src: &[u8], meta: &[u8], dst: &mut [u8], notes: &mut Vec<String>) -> Outcome {
+    decode_all(runs, src, meta, dst, notes).out
 }
 
 pub(crate) fn block_size(d: &Dcc) -> Result<u32, Stop> {
@@ -118,31 +153,55 @@ pub(crate) fn block_size(d: &Dcc) -> Result<u32, Stop> {
     Ok(acc.count_ones() << 5)
 }
 
-pub(crate) fn encode_blocks(runs: &mut [Dcc], src: &[u8], dst: &mut [u8], meta: &mut [u8], mut sizes: Option<&mut [u32]>) -> Outcome {
+pub(crate) const OVERRUN: &str = "the packed stream overruns the console's 256-byte heap output surface; whether the console then crashes depends on what the heap holds next to it";
+
+pub(crate) fn encode_all(runs: &mut [Dcc], src: &[u8], dst: &mut [u8], meta: &mut [u8], mut sizes: Option<&mut [u32]>) -> Blocks {
+    let mut stop = None;
+    let mut live = vec![true; runs.len()];
     for i in 0..meta.len() {
         let mut outs = Vec::with_capacity(runs.len());
-        for d in runs.iter_mut() {
+        for (k, d) in runs.iter_mut().enumerate() {
+            if !live[k] {
+                continue;
+            }
             d.s[0].copy_from_slice(&src[i * 256..i * 256 + 256]);
             d.msg.clear();
             if let Err(e) = enc::run(d) {
-                return Outcome::Stopped { block: i, why: why(e) };
+                live[k] = false;
+                first(&mut stop, i, why(e));
+                continue;
+            }
+            if !d.spill.is_empty() {
+                first(&mut stop, i, why(Stop::Undef(OVERRUN)));
             }
             match block_size(d) {
                 Ok(s) => outs.push((d.s[1], d.o[0x34], s)),
-                Err(e) => return Outcome::Stopped { block: i, why: why(e) },
+                Err(e) => {
+                    live[k] = false;
+                    first(&mut stop, i, why(e));
+                }
             }
         }
-        if outs.iter().any(|o| *o != outs[0]) {
-            return Outcome::Stopped { block: i, why: "the output takes bytes the console never wrote this call (uninitialised heap surfaces or codec object stack)".into() };
+        if live.iter().any(|l| !l) {
+            break;
         }
-        let (b, m, s) = outs[0];
-        dst[i * 256..i * 256 + 256].copy_from_slice(&b);
-        meta[i] = m;
-        if let Some(z) = sizes.as_deref_mut() {
-            z[i] = s;
+        if outs.iter().any(|o| *o != outs[0]) {
+            first(&mut stop, i, DIVERGED.into());
+        }
+        if stop.is_none() {
+            let (b, m, s) = outs[0];
+            dst[i * 256..i * 256 + 256].copy_from_slice(&b);
+            meta[i] = m;
+            if let Some(z) = sizes.as_deref_mut() {
+                z[i] = s;
+            }
         }
     }
-    Outcome::Done
+    Blocks { poisoned: live.iter().any(|l| !l), out: outcome(stop) }
+}
+
+pub(crate) fn encode_blocks(runs: &mut [Dcc], src: &[u8], dst: &mut [u8], meta: &mut [u8], sizes: Option<&mut [u32]>) -> Outcome {
+    encode_all(runs, src, dst, meta, sizes).out
 }
 
 pub(crate) struct Call<'a> {
@@ -159,8 +218,9 @@ pub(crate) fn decode(c: &Call, src: &[u8], meta: &[u8], dst: &mut [u8]) -> i32 {
         Err(hr) => return hr,
     };
     let mut notes = Vec::new();
-    let out = decode_blocks(&mut runs, src, meta, dst, &mut notes);
-    commit(&mut sc, &runs);
+    let r = decode_all(&mut runs, src, meta, dst, &mut notes);
+    commit(&mut sc, &runs, r.poisoned);
+    let out = r.out;
     drop(sc);
     for n in notes.iter().take(4) {
         compat_common::record(crate::M, c.name, &format!("console codec reports: {n}; it carries on and returns S_OK, as native does"));
@@ -174,8 +234,9 @@ pub(crate) fn encode(c: &Call, src: &[u8], dst: &mut [u8], meta: &mut [u8], size
         Ok(r) => r,
         Err(hr) => return hr,
     };
-    let out = encode_blocks(&mut runs, src, dst, meta, sizes);
-    commit(&mut sc, &runs);
+    let r = encode_all(&mut runs, src, dst, meta, sizes);
+    commit(&mut sc, &runs, r.poisoned);
+    let out = r.out;
     drop(sc);
     finish(c, out)
 }

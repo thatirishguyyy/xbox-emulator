@@ -3,7 +3,7 @@ name = "audiohalwrapper"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox console AudioHALWrapper.dll: the 32 Opus/SILK hardware-codec exports GameChat2 and PartyWin load by name, with the console slot/state machine and a runtime-loaded software codec (opus.dll, SKP SILK SDK dll)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "AudioHALWrapper"

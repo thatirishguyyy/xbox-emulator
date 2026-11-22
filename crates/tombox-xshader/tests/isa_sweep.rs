@@ -332,6 +332,7 @@ fn cs_extract(words: &[u32]) -> ShaderExtract {
         flags: 1,
         params: vec![RootParam { visibility: 5, kind: RootParamKind::Table(vec![RootRange { range_type: 1, num: 8, base_register: 0, space: 0, offset_in_table: u32::MAX }]) }],
         num_static_samplers: 0,
+        static_samplers: Vec::new(),
     };
     ShaderExtract {
         stage: Stage::Compute,
@@ -672,7 +673,7 @@ fn isa_sweep() {
     assert!(failed.is_empty(), "{} mnemonics failing (see table above)", failed.len());
 }
 
-const WARP_KNOWN: &[&str] = &["v_ceil_f64", "v_floor_f64", "v_trunc_f64", "v_rndne_f64", "v_fract_f64", "v_cvt_f64_i32", "v_cvt_u32_f64", "v_fma_f64", "v_div_fmas_f64", "v_madak_f32"];
+const WARP_KNOWN: &[&str] = &["v_ceil_f64", "v_floor_f64", "v_trunc_f64", "v_rndne_f64", "v_fract_f64", "v_cvt_f64_i32", "v_cvt_u32_f64", "v_fma_f64", "v_div_fmas_f64", "v_madak_f32", "v_fmaak_f16"];
 
 #[test]
 fn isa_sweep_hlsl_probe() {

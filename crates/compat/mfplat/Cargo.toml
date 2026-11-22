@@ -3,7 +3,7 @@ name = "mfplat"
 version = "0.1.0"
 edition = "2021"
 description = "Proxy for Xbox mfplat.dll: every PC mfplat export is a PE export forwarder to the real system mfplat (staged as mfplat_sys.dll), MFCreateDXGISurfaceBufferX forwards to MFCreateDXGISurfaceBuffer, and the console-only exports (MFResetDXGIDeviceManagerX, MFJoinIoPort, MFGetPrivateWorkqueues, MFBlockThread, MFUnblockThread, LFGetGlobalPool) follow the console mfplat.dll decompile, and MFGetPlatform returns the console mfplat.dll's own CMFPlatform object, started and shut down in lockstep with the proxy."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

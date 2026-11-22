@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use xbtp::dispatcher::IID_XBTP_DISPATCHER;
 use xbtp::dispatcher_com::DispatcherCom;
 use xbtp::start::XbtpStartDispatcherEx;
-use xbtp::xbtp2_ext::{Message, MetadataVtbl, IID_XBTP_EXTENSION_METADATA};
+use xbtp::xbtp2_ext::{EndMessage, Message, MetadataVtbl, IID_XBTP_EXTENSION_METADATA};
 
 pub static PORT_LOCK: Mutex<()> = Mutex::new(());
 static SEEN: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
@@ -32,7 +32,7 @@ unsafe fn record(op: u32, received: usize, reply: usize) -> HRESULT {
     SEEN.lock().unwrap().push((op, msg_text(received as *mut c_void)));
     let r = REPLY.lock().unwrap().clone();
     if !r.is_empty() {
-        let m = reply as *mut Message;
+        let m = reply as *mut EndMessage;
         let t = w(&r);
         assert_eq!(((*(*m).vtbl).set_json_body_w)(m, t.as_ptr()), S_OK);
     }

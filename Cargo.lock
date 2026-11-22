@@ -276,6 +276,7 @@ dependencies = [
 name = "kernelbase"
 version = "0.1.0"
 dependencies = [
+ "compat-common",
  "xone-exports",
 ]
 
@@ -1049,6 +1050,8 @@ dependencies = [
 name = "xtfdebugmonitor"
 version = "0.1.0"
 dependencies = [
+ "compat-common",
+ "xbtp",
  "xtfcommon",
  "xtfmsg",
 ]
@@ -1082,6 +1085,7 @@ dependencies = [
 name = "xtfmsg"
 version = "0.1.0"
 dependencies = [
+ "xbtp",
  "xtfcommon",
 ]
 
@@ -1098,6 +1102,7 @@ dependencies = [
 name = "xtfremoterun"
 version = "0.1.0"
 dependencies = [
+ "compat-common",
  "console-sandbox",
  "xbtp",
  "xtfcommon",

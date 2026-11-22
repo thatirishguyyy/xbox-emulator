@@ -3,7 +3,7 @@ name = "tombox-rpf"
 version = "0.1.0"
 edition = "2021"
 description = "Inspector for RAGE package files (.rpf): header fields and region map. Reads structure only; does not decrypt. Zero dependencies."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "tombox_rpf"

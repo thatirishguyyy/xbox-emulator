@@ -526,6 +526,7 @@ unsafe fn run_steps(queue: *mut c_void, steps: &[Step], lists: &[*mut c_void], e
                 }
             }
             Step::WaitAddr { addr, seq } => {
+                crate::qwait::step(crate::qwait::STEP_ADDR);
                 let f = unsafe { fence(queue, false, addr) };
                 if !f.is_null() {
                     unsafe { wait(queue, f, seq) };
@@ -538,6 +539,7 @@ unsafe fn run_steps(queue: *mut c_void, steps: &[Step], lists: &[*mut c_void], e
                 }
             }
             Step::WaitCond { id } => {
+                crate::qwait::step(crate::qwait::STEP_COND);
                 if let Some((f, v)) = cond_take(id, || unsafe { new_fence(queue) }) {
                     unsafe { wait(queue, f as *mut c_void, v) };
                 }
@@ -551,6 +553,7 @@ unsafe fn run_steps(queue: *mut c_void, steps: &[Step], lists: &[*mut c_void], e
                 }
             }
             Step::WaitProbe { id, addr, func, value, mask } => {
+                crate::qwait::step(crate::qwait::STEP_PROBE);
                 let armed = crate::wait_probe::probe_target(addr, mask > u32::MAX as u64).and_then(|(res, off)| {
                     let (f, v) = cond_take(id, || unsafe { new_fence(queue) })?;
                     unsafe { crate::wait_probe::arm(queue, ty, crate::wait_probe::Probe { id, res, off, wide: mask > u32::MAX as u64, func, value, mask }) };
@@ -562,6 +565,7 @@ unsafe fn run_steps(queue: *mut c_void, steps: &[Step], lists: &[*mut c_void], e
                 }
             }
             Step::WaitPoll { id, addr, func, value, mask } => {
+                crate::qwait::step(crate::qwait::STEP_POLL);
                 let armed = cpu_address(addr).and_then(|p| {
                     let (f, v) = cond_take(id, || unsafe { new_fence(queue) })?;
                     unsafe { wait(queue, f as *mut c_void, v) };

@@ -3,7 +3,7 @@ name = "gamecoreclient"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console gamecoreclient.dll (GameCore proxy-app client): DllGetClassObject and DllCanUnloadNow run the console DLL itself with its OS imports routed to console-sandbox (xvcmgmt queue device, XBOX://LI launch claim); DllGetActivationFactory follows the console body (no activatable classes)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

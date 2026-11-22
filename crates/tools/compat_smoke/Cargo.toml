@@ -3,7 +3,7 @@ name = "compat_smoke"
 version = "0.1.0"
 edition = "2021"
 description = "Workspace smoke test for compat DLLs: builds each crate with an exports.txt, loads the DLL in an isolated child process, checks every covered export resolves, forwarders bind and imports load on this PC; writes tools/dev/smoke_report.md."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "compat_smoke"

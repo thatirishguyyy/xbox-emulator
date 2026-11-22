@@ -1112,7 +1112,8 @@
         "MFJoinIoPort": "implemented",
         "MFBlockThread": "implemented",
         "MFUnblockThread": "implemented",
-        "MFGetPrivateWorkqueues": "implemented"
+        "MFGetPrivateWorkqueues": "implemented",
+        "MFGetPlatform": "implemented"
       },
       "notes": {
         "MFCreateDXGISurfaceBufferX": "forwards to PC MFCreateDXGISurfaceBuffer (console drops fBottomUp for D3D12 resources)",
@@ -1158,7 +1159,15 @@
     "gamecoreclient_verified": "2026-11-21 verifier PASS: gamecoreclient DllGetClassObject F5715449/7FA7A8FD construct on all 4 dumps via sandboxed console DLL, XBOX://LI claim, emulated xvcmgmt (8 IOCTLs match XDefiant xvcmgmt.sys). Gap: host side of the {c12a416b,LI} protocol is not implemented (sends logged, no replies) - BLOCKERS.",
     "xtaskqueue_terminate_verified": "2026-11-21 verifier round 3 PASS: XTaskQueueTerminate/CreateComposite; E_ABORT matches console helper 0x6d7f8 (submit 0x6be20/0x6c410, attach 0x6d020); process queue E_ACCESSDENIED (0x6d0d8). Known blocking cases match the console/libHttpClient model.",
     "console_identical_rule": "2026-11-21: a row whose console body is a fixed return counts implemented only when an oracle test calls every distinct console copy and ours with the same inputs and they match (return, out-params, LastError). Stub = our own fixed failure without that proof.",
-    "console_identical_verified_20261121": "34 fixed-return rows (xcrdapi 7, mflnmhelp 3, mfhevcdec 1, advapi32legacy 1, pixevt 1, sc_dll 3, xbsc_xs 1, xbtp 7, d3d12_x 6, d3d12_xs 4) independently disassembled in every distinct dump copy and oracle-tested; PASS. No title exe imports them; only console system DLLs. Out-param writes of XbtpLinkGetServiceLocation and XbtpOpenXtcSession are copied."
+    "console_identical_verified_20261121": "34 fixed-return rows (xcrdapi 7, mflnmhelp 3, mfhevcdec 1, advapi32legacy 1, pixevt 1, sc_dll 3, xbsc_xs 1, xbtp 7, d3d12_x 6, d3d12_xs 4) independently disassembled in every distinct dump copy and oracle-tested; PASS. No title exe imports them; only console system DLLs. Out-param writes of XbtpLinkGetServiceLocation and XbtpOpenXtcSession are copied.",
+    "gamecoreclient_partial_20261121": "Row 3 back to pending: host broker serves IGameCoreApiService, SipcProxyController(2), DisplayMode IServer3; still refuses CursorController 939c387a, ICrossVmAudio 7267fd98 and ~45 xgameruntime service servers; host pushes no queue messages.",
+    "xbtp_xtf_verified_20261121": "Verifier PASS: xbtp OpenSession x4, Dispatcher Run, AddPipeEndpoint, StartDispatcher(Ex) (cross-tested port<->console client/server on loopback); xtfpix 6 (58-case oracle vs 3 copies, 0 diffs); xtfdebugmonitor 2; XtfCreateRemoteRunClient. Held: XbtpWrapDispatcher (RegisterRedirect E_NOTIMPL, SetSessionKey error codes), xtfremoterun #4 (job/image tables empty in production).",
+    "console_batch5_verified_20261121": "Verifier PASS: wldp WldpSendSmartAppControlBlockToast (XmlDocument class absent from all 8 hives x3 dumps, no msxml6), hix_xs CollectHangSummary (console DLL passthrough, KMD emulated), netprofmsvc_c DllMain, xtffileio #4, xtfconsolecontrol #4. Held: kernelbase family xref (no registry keys/DACL), passwordless (fixed token, wrong user SID).",
+    "xg_x_layout_failing_20261121": "4 xg_x layout oracle tests fail vs console (texture1d computer/layout, texture3d layout, computer with pitch): rows back to pending.",
+    "xbtp_remoterun_closed_20261121": "XbtpWrapDispatcher: RegisterRedirect ported (console 0x1fcc0/AddRedirect 0x11618), SetSessionKey always S_OK like 0x1f700. xtfremoterun #4: unregistered images -> 0x80070002 regardless of disk, restricted token unless keep-token, only redirect pipes inherited (stricter than console), session-key gate is the hosting dispatcher (0x8C11040B), loopback only. Promoted on implementer tests per the 11-21 game-tests-over-verify rule.",
+    "family_xref_passwordless_20261121": "kernelbase FamilyXref now persists to emulated HKU store with Flags/InstallTime/DACL, served by reg hooks; passwordless uses caller token, XDefiant lsasrv table (0x86), UserConfig under caller SID. Gaps (BLOCKERS): RegGetValueW/RegEnumKeyExW/RegQueryInfoKeyW read-back not hooked. Sandbox fs::resolve mid-path drive escape fixed (STATUS_OBJECT_NAME_INVALID), 50k fuzz.",
+    "xg_x_dcc_20261121": "xg_x DCC: 0 call-sequence divergences on all 3 console builds (~4100 calls each); 29 encoder inputs rejected because the console result depends on heap/stack state; overruns rejected in bounds. xg_xs DCC back to stub (console writes caller stack addresses into output).",
+    "xg_layout_20261122": "xg_x layout rewritten from traced console model (tile/macro tables both hw levels, format table, planar, display MSAA, WithPitch applied); 0 mismatches vs 3 console builds. xg_xs 2D layout port unchanged: failing cases were console uninitialised/IAT reads."
   },
   "hooked": {
     "file": "crates/compat/compat-common/src/net_guard.rs",
@@ -1427,9 +1436,9 @@
         "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 27 (thread_set_time_sensitive)",
         "XThreadAssertNotTimeSensitive",
         "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 30 (thread_is_time_sensitive)",
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 23 (not served)",
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 24 (not served)",
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 26 (not served)"
+        "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 23 (q_register_monitor)",
+        "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 24 (q_unregister_monitor)",
+        "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 26 (q_set_process)"
       ],
       "titles": {
         "XAsyncGetStatus": [
@@ -1568,20 +1577,15 @@
         "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 30 (thread_is_time_sensitive)": [
           "Terraria"
         ],
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 23 (not served)": [
+        "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 23 (q_register_monitor)": [
           "Minecraft"
         ],
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 24 (not served)": [
+        "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 24 (q_unregister_monitor)": [
           "Minecraft"
         ],
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 26 (not served)": [
+        "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 26 (q_set_process)": [
           "Minecraft"
         ]
-      },
-      "status": {
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 23 (not served)": "missing",
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 24 (not served)": "missing",
-        "XAsync/XTaskQueue/XThread(073b7dcb) slot 26 (not served)": "missing"
       }
     },
     "GDK XDisplay (QueryApiImpl)": {
@@ -1868,6 +1872,42 @@
         ]
       }
     },
+    "GDK XGameStreaming (QueryApiImpl)": {
+      "file": "crates/compat/compat-common/src/gdk/streaming.rs",
+      "dir": "xgameruntime QueryApiImpl (title call sites, analysis/gdk)",
+      "functions": [
+        "XGameStreaming(5f5e5169) slot 3 (initialize)",
+        "XGameStreaming(5f5e5169) slot 6 (register_client_properties)",
+        "XGameStreaming(5f5e5169) slot 7 (unregister_client_properties)",
+        "XGameStreaming(5f5e5169) slot 8 (physical_dimensions)",
+        "XGameStreaming(5f5e5169) slot 12 (register_connection_state)",
+        "XGameStreaming(5f5e5169) slot 13 (unregister_connection_state)",
+        "XGameStreaming(5f5e5169) slot 17 (hide_touch_controls)"
+      ],
+      "titles": {
+        "XGameStreaming(5f5e5169) slot 3 (initialize)": [
+          "Minecraft"
+        ],
+        "XGameStreaming(5f5e5169) slot 6 (register_client_properties)": [
+          "Minecraft"
+        ],
+        "XGameStreaming(5f5e5169) slot 7 (unregister_client_properties)": [
+          "Minecraft"
+        ],
+        "XGameStreaming(5f5e5169) slot 8 (physical_dimensions)": [
+          "Minecraft"
+        ],
+        "XGameStreaming(5f5e5169) slot 12 (register_connection_state)": [
+          "Minecraft"
+        ],
+        "XGameStreaming(5f5e5169) slot 13 (unregister_connection_state)": [
+          "Minecraft"
+        ],
+        "XGameStreaming(5f5e5169) slot 17 (hide_touch_controls)": [
+          "Minecraft"
+        ]
+      }
+    },
     "GDK XGameUi (QueryApiImpl)": {
       "file": "crates/compat/compat-common/src/gdk/ui.rs",
       "dir": "xgameruntime QueryApiImpl (title call sites, analysis/gdk)",
@@ -1897,10 +1937,7 @@
         "XGameUi(72c4e70f) slot 26 (web_auth_result)",
         "XGameUi(72c4e70f) slot 27 (web_auth_options_async)",
         "XGameUi(72c4e70f) slot 30 (mpa_invite_async)",
-        "XGameUi(72c4e70f) slot 31 (status_result)",
-        "XGameUi(fc0b9bd0) slot 17 (not served)",
-        "XGameUi(fc0b9bd0) slot 18 (not served)",
-        "XGameUi(fc0b9bd0) slot 19 (not served)"
+        "XGameUi(72c4e70f) slot 31 (status_result)"
       ],
       "titles": {
         "XGameUiShowMessageDialogAsync": [
@@ -1937,17 +1974,20 @@
         ],
         "XGameUiShowTextEntryAsync": [
           "Fortnite",
+          "Minecraft",
           "Terraria",
           "Trackmania",
           "XDefiant"
         ],
         "XGameUiShowTextEntryResultSize": [
           "Fortnite",
+          "Minecraft",
           "Terraria",
           "XDefiant"
         ],
         "XGameUiShowTextEntryResult": [
           "Fortnite",
+          "Minecraft",
           "Terraria",
           "Trackmania",
           "XDefiant"
@@ -2003,21 +2043,7 @@
         ],
         "XGameUi(72c4e70f) slot 31 (status_result)": [
           "Terraria"
-        ],
-        "XGameUi(fc0b9bd0) slot 17 (not served)": [
-          "Minecraft"
-        ],
-        "XGameUi(fc0b9bd0) slot 18 (not served)": [
-          "Minecraft"
-        ],
-        "XGameUi(fc0b9bd0) slot 19 (not served)": [
-          "Minecraft"
         ]
-      },
-      "status": {
-        "XGameUi(fc0b9bd0) slot 17 (not served)": "missing",
-        "XGameUi(fc0b9bd0) slot 18 (not served)": "missing",
-        "XGameUi(fc0b9bd0) slot 19 (not served)": "missing"
       }
     },
     "GDK XLaunchUri (QueryApiImpl)": {
@@ -2177,7 +2203,7 @@
         "XPackage(f92d8712) slot 30 (get_write_stats)",
         "XPackage(f92d8712) slot 33 (enumerate_features)",
         "XPackage(f92d8712) slot 36 (register_installed)",
-        "XPackage(3720de07) slot 11 (not served)"
+        "XPackage(3720de07) slot 11 (get_user_locale)"
       ],
       "titles": {
         "XPackageGetCurrentProcessPackageIdentifier": [
@@ -2264,12 +2290,9 @@
           "Trackmania",
           "XDefiant"
         ],
-        "XPackage(3720de07) slot 11 (not served)": [
+        "XPackage(3720de07) slot 11 (get_user_locale)": [
           "Minecraft"
         ]
-      },
-      "status": {
-        "XPackage(3720de07) slot 11 (not served)": "missing"
       }
     },
     "GDK XPersistentLocalStorage (QueryApiImpl)": {
@@ -2279,8 +2302,8 @@
         "XPersistentLocalStorage(d29411df) slot 3 (pls_path_size)",
         "XPersistentLocalStorageGetPath",
         "XPersistentLocalStorageGetSpaceInfo",
-        "XPersistentLocalStorage(d29411df) slot 6 (not served)",
-        "XPersistentLocalStorage(d29411df) slot 7 (not served)"
+        "XPersistentLocalStorage(d29411df) slot 6 (pls_prompt_async)",
+        "XPersistentLocalStorage(d29411df) slot 7 (pls_prompt_result_slot)"
       ],
       "titles": {
         "XPersistentLocalStorage(d29411df) slot 3 (pls_path_size)": [
@@ -2300,16 +2323,16 @@
           "Fortnite",
           "Minecraft"
         ],
-        "XPersistentLocalStorage(d29411df) slot 6 (not served)": [
+        "XPersistentLocalStorage(d29411df) slot 6 (pls_prompt_async)": [
           "Minecraft"
         ],
-        "XPersistentLocalStorage(d29411df) slot 7 (not served)": [
+        "XPersistentLocalStorage(d29411df) slot 7 (pls_prompt_result_slot)": [
           "Minecraft"
         ]
       },
       "status": {
-        "XPersistentLocalStorage(d29411df) slot 6 (not served)": "missing",
-        "XPersistentLocalStorage(d29411df) slot 7 (not served)": "missing"
+        "XPersistentLocalStorage(d29411df) slot 6 (pls_prompt_async)": "pending",
+        "XPersistentLocalStorage(d29411df) slot 7 (pls_prompt_result_slot)": "pending"
       }
     },
     "GDK XStore (QueryApiImpl)": {
@@ -2702,8 +2725,7 @@
         "XSystemGetConsoleId",
         "XSystemGetXboxLiveSandboxId",
         "XSystem(67ce4bfc) slot 5 (get_app_device_id)",
-        "XSystem(6fd71f09) slot 4 (get_app_device_id)",
-        "XSystem(6fd71f09) slot 5 (not served)"
+        "XSystem(6fd71f09) slot 5 (get_app_device_id)"
       ],
       "titles": {
         "XSystemGetConsoleId": [
@@ -2712,6 +2734,7 @@
         ],
         "XSystemGetXboxLiveSandboxId": [
           "Fortnite",
+          "Minecraft",
           "Terraria",
           "Trackmania",
           "XDefiant"
@@ -2719,16 +2742,9 @@
         "XSystem(67ce4bfc) slot 5 (get_app_device_id)": [
           "Terraria"
         ],
-        "XSystem(6fd71f09) slot 4 (get_app_device_id)": [
-          "Minecraft",
-          "Terraria"
-        ],
-        "XSystem(6fd71f09) slot 5 (not served)": [
+        "XSystem(6fd71f09) slot 5 (get_app_device_id)": [
           "Minecraft"
         ]
-      },
-      "status": {
-        "XSystem(6fd71f09) slot 5 (not served)": "missing"
       }
     },
     "GDK XSystemAnalytics (QueryApiImpl)": {
@@ -2788,7 +2804,7 @@
         "XUserGetTokenAndSignatureResultSize",
         "XUserGetTokenAndSignatureUtf16ResultSize",
         "XUserResolveIssueWithUiResult",
-        "XUser(eb9bf948) slot 13 (not served)"
+        "XUser(eb9bf948) slot 13 (get_is_guest)"
       ],
       "titles": {
         "XUserDuplicateHandle": [
@@ -2978,12 +2994,9 @@
         "XUserResolveIssueWithUiResult": [
           "Fortnite"
         ],
-        "XUser(eb9bf948) slot 13 (not served)": [
+        "XUser(eb9bf948) slot 13 (get_is_guest)": [
           "Minecraft"
         ]
-      },
-      "status": {
-        "XUser(eb9bf948) slot 13 (not served)": "missing"
       }
     },
     "GDK XUserDevice (QueryApiImpl)": {
@@ -3047,51 +3060,6 @@
           "XDefiant"
         ]
       }
-    },
-    "GDK 0a2192aa (QueryApiImpl)": {
-      "file": "crates/compat/compat-common/src/gdk/mod.rs",
-      "dir": "xgameruntime QueryApiImpl (title call sites, analysis/gdk)",
-      "functions": [
-        "0a2192aa(5f5e5169) slot 3 (not served)",
-        "0a2192aa(5f5e5169) slot 6 (not served)",
-        "0a2192aa(5f5e5169) slot 7 (not served)",
-        "0a2192aa(5f5e5169) slot 8 (not served)",
-        "0a2192aa(5f5e5169) slot 12 (not served)",
-        "0a2192aa(5f5e5169) slot 13 (not served)",
-        "0a2192aa(5f5e5169) slot 17 (not served)"
-      ],
-      "titles": {
-        "0a2192aa(5f5e5169) slot 3 (not served)": [
-          "Minecraft"
-        ],
-        "0a2192aa(5f5e5169) slot 6 (not served)": [
-          "Minecraft"
-        ],
-        "0a2192aa(5f5e5169) slot 7 (not served)": [
-          "Minecraft"
-        ],
-        "0a2192aa(5f5e5169) slot 8 (not served)": [
-          "Minecraft"
-        ],
-        "0a2192aa(5f5e5169) slot 12 (not served)": [
-          "Minecraft"
-        ],
-        "0a2192aa(5f5e5169) slot 13 (not served)": [
-          "Minecraft"
-        ],
-        "0a2192aa(5f5e5169) slot 17 (not served)": [
-          "Minecraft"
-        ]
-      },
-      "status": {
-        "0a2192aa(5f5e5169) slot 3 (not served)": "missing",
-        "0a2192aa(5f5e5169) slot 6 (not served)": "missing",
-        "0a2192aa(5f5e5169) slot 7 (not served)": "missing",
-        "0a2192aa(5f5e5169) slot 8 (not served)": "missing",
-        "0a2192aa(5f5e5169) slot 12 (not served)": "missing",
-        "0a2192aa(5f5e5169) slot 13 (not served)": "missing",
-        "0a2192aa(5f5e5169) slot 17 (not served)": "missing"
-      }
     }
   },
   "rdna2_pending": {
@@ -3114,13 +3082,8 @@
     "XVMAudioService.dll": [
       "DllGetClassObject"
     ],
-    "xg_xs.dll": [
-      "XGDecodeDCC",
-      "XGEncodeDCC"
-    ],
-    "xg_x.dll": [
-      "XGDecodeDCC",
-      "XGEncodeDCC"
+    "gamecoreclient.dll": [
+      "DllGetClassObject"
     ]
   }
 }

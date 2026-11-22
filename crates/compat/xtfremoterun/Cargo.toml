@@ -3,7 +3,7 @@ name = "xtfremoterun"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console xtfremoterun.dll (Xbox Tools Framework remote-run extension: the Run server operation that launches a console process with redirected console pipes, and the RemoteRunClient that drives it over an xbtp session)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]
@@ -15,6 +15,7 @@ path = "src/lib.rs"
 xtfcommon = { path = "../xtfcommon" }
 xtfmsg = { path = "../xtfmsg" }
 console-sandbox = { path = "../console-sandbox" }
+compat-common = { path = "../compat-common" }
 
 [build-dependencies]
 xtfcommon = { path = "../xtfcommon" }

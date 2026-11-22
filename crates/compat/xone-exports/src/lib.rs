@@ -178,6 +178,53 @@ pub fn check_crate(crate_dir: &str, dll: &str, exports_txt: &str) {
     }
 }
 
+fn profile_dir_of(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    exe.ancestors().skip(1).find(|a| matches!(a.file_name().and_then(|n| n.to_str()), Some("debug") | Some("release")) && a.parent().is_some()).map(|a| a.to_path_buf())
+}
+
+pub fn build_cdylib(cargo: &str, manifest_dir: &str, package: &str, dll: &str) -> std::path::PathBuf {
+    static BUILT: std::sync::Mutex<Vec<(String, std::path::PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = built.iter().find(|(k, _)| k == package) {
+        return p.clone();
+    }
+    let exe = std::env::current_exe().expect("test exe path");
+    let profile = profile_dir_of(&exe).unwrap_or_else(|| panic!("no debug/release directory above {}", exe.display()));
+    let target = profile.parent().unwrap().to_path_buf();
+    let mut cmd = std::process::Command::new(cargo);
+    cmd.current_dir(manifest_dir).args(["build", "--offline", "-p", package]).env("CARGO_TARGET_DIR", &target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    if profile.file_name().and_then(|n| n.to_str()) == Some("release") {
+        cmd.arg("--release");
+    }
+    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("spawn {cargo} build -p {package}: {e}"));
+    let reader = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut s = String::new();
+            let _ = e.read_to_string(&mut s);
+            s
+        })
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("wait for cargo build") {
+            break s;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(900) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cargo build -p {package} did not finish within 900 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let err = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+    assert!(status.success(), "cargo build -p {package} failed ({status}):\n{err}");
+    let p = profile.join(dll);
+    assert!(p.is_file(), "cargo build -p {package} succeeded but {} is missing", p.display());
+    built.push((package.to_string(), p.clone()));
+    p
+}
+
 pub fn check_built(crate_dir: &str, dll: &str, exports_txt: &str) {
     let want = table(&parse(exports_txt));
     let Some(p) = built_dll(crate_dir, dll) else {

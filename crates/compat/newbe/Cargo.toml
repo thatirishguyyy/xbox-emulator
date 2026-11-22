@@ -3,7 +3,7 @@ name = "newbe"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console shader backend newbe.dll: every NB_ entry point forwarded to the console's own newbe.dll from the title dump (read-only)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

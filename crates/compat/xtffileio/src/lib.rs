@@ -1,5 +1,7 @@
 #![allow(non_snake_case, clippy::missing_safety_doc)]
 
+pub mod client;
+pub mod client_copy;
 pub mod com;
 pub mod file;
 pub mod find;
@@ -13,6 +15,12 @@ pub mod fileio_b;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod client_tests;
+
+#[cfg(test)]
+mod client_copy_tests;
 
 use com::*;
 use core::ffi::c_void;

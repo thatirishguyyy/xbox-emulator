@@ -264,7 +264,9 @@ pub unsafe extern "system" fn text_entry_size(_t: This, block: *mut c_void, size
     }
     let mut n = 0usize;
     let hr = xasync::size(block, &mut n);
-    *size = n as u32;
+    if hr >= 0 {
+        *size = n as u32;
+    }
     hr
 }
 
@@ -351,7 +353,7 @@ pub fn interfaces() -> Vec<Iface> {
     ]);
     vec![
         Iface { clsid: CLSID, iid: IID_V1, name: "XGameUi(6eeaa73e)", slots: v1 },
-        Iface { clsid: CLSID, iid: IID_V2, name: "XGameUi(72c4e70f)", slots: v2 },
-        Iface { clsid: CLSID, iid: IID_FC0B, name: "XGameUi(fc0b9bd0)", slots: v1_slots() },
+        Iface { clsid: CLSID, iid: IID_V2, name: "XGameUi(72c4e70f)", slots: v2.clone() },
+        Iface { clsid: CLSID, iid: IID_FC0B, name: "XGameUi(fc0b9bd0)", slots: v2 },
     ]
 }

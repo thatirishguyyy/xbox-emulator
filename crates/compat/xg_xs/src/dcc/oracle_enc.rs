@@ -5,7 +5,7 @@ use crate::layout::E_INVALIDARG;
 use crate::oracle::{oracle, Oracle, SERIAL};
 
 #[derive(Clone, Copy)]
-enum St {
+pub(super) enum St {
     Lay(usize, u32),
     C1(usize, fn(&mut Dcc) -> Result<(), i32>),
     Sub,
@@ -30,7 +30,7 @@ fn stages() -> Vec<(&'static str, St)> {
     ]
 }
 
-fn console_stage(o: &Oracle, c: &Con, s: &Dcc, st: St) -> Dcc {
+pub(super) fn console_stage(o: &Oracle, c: &Con, s: &Dcc, st: St) -> Dcc {
     c.push(s);
     match st {
         St::Lay(src, mode) => {
@@ -259,7 +259,7 @@ fn oracle_dcc_enc_e2e() {
     assert_eq!(rtbad, 0);
 }
 
-fn reject_cause(d0: &Dcc, inp: &[u8; 256]) -> &'static str {
+pub(super) fn reject_cause(d0: &Dcc, inp: &[u8; 256]) -> &'static str {
     let mut d = copy(d0);
     d.b[0] = *inp;
     d.w64(0x13c0, 0);
@@ -344,56 +344,6 @@ fn caller_outputs(c: &Con, s: &Dcc) -> Vec<(Vec<u8>, u8)> {
     v
 }
 
-extern "system" {
-    fn VirtualProtect(addr: *mut core::ffi::c_void, size: usize, prot: u32, old: *mut u32) -> i32;
-}
-
-static REAL_VSPRINTF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static PAD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-type Vsp = unsafe extern "system" fn(u64, *mut u8, usize, *const u8, usize, usize) -> i32;
-
-#[inline(never)]
-unsafe extern "system" fn deep_vsprintf(o: u64, b: *mut u8, n: usize, f: *const u8, l: usize, a: usize) -> i32 {
-    let mut pad = [0u8; 0x700];
-    let v = PAD.load(std::sync::atomic::Ordering::SeqCst);
-    for (i, x) in pad.iter_mut().enumerate() {
-        let w = if v & 1 != 0 { v ^ (i as u8).wrapping_mul(0x3b) } else { v };
-        core::ptr::write_volatile(x, w);
-    }
-    let real: Vsp = core::mem::transmute(REAL_VSPRINTF.load(std::sync::atomic::Ordering::SeqCst));
-    let r = real(o, b, n, f, l, a);
-    core::ptr::read_volatile(&pad[0x345]);
-    r
-}
-
-fn vsprintf_slot(o: &Oracle) -> *mut usize {
-    let t = (o.h + 0x4e980) as *const u8;
-    unsafe {
-        assert_eq!((*t, *t.add(1)), (0xff, 0x25));
-        let disp = core::ptr::read_unaligned(t.add(2) as *const i32);
-        (o.h as isize + 0x4e986 + disp as isize) as *mut usize
-    }
-}
-
-fn with_deep_crt<R>(o: &Oracle, pad: u8, f: impl FnOnce() -> R) -> R {
-    let slot = vsprintf_slot(o);
-    let mut old = 0u32;
-    unsafe {
-        assert!(VirtualProtect(slot as *mut _, 8, 0x04, &mut old) != 0);
-        REAL_VSPRINTF.store(*slot, std::sync::atomic::Ordering::SeqCst);
-        PAD.store(pad, std::sync::atomic::Ordering::SeqCst);
-        *slot = deep_vsprintf as usize;
-    }
-    let r = f();
-    unsafe {
-        *slot = REAL_VSPRINTF.load(std::sync::atomic::Ordering::SeqCst);
-        let mut o2 = 0u32;
-        VirtualProtect(slot as *mut _, 8, old, &mut o2);
-    }
-    r
-}
-
 #[test]
 fn oracle_dcc_enc_undefined_classes() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -403,7 +353,6 @@ fn oracle_dcc_enc_undefined_classes() {
     let mut seen: std::collections::BTreeMap<&'static str, (u64, u64)> = std::collections::BTreeMap::new();
     let mut same = Vec::new();
     let mut callers: std::collections::BTreeMap<(&'static str, Option<usize>), u64> = std::collections::BTreeMap::new();
-    let mut crts: std::collections::BTreeMap<(&'static str, bool), u64> = std::collections::BTreeMap::new();
     let mut grp: std::collections::BTreeMap<String, (u64, u64, String)> = std::collections::BTreeMap::new();
     for &((f, sw, dim, p0, p1), _) in &st {
         let mut d = Dcc::new();
@@ -435,15 +384,9 @@ fn oracle_dcc_enc_undefined_classes() {
                 let w = caller_outputs(&c, &s);
                 let k = (1..w.len()).find(|&k| w[k] != w[0]);
                 *callers.entry((cause, k)).or_insert(0u64) += 1;
-                let crt: Vec<(Vec<u8>, u8)> = [0x11u8, 0xee, 0x00, 0x01, 0x80, 0x7f, 0x02, 0x40, 0x23, 0xc5, 0xfe, 0x5a, 0xaa, 0xf0, 0x0e].iter().map(|&v| with_deep_crt(&o, v, || {
-                    c.push(&s);
-                    let p = drive_plain(&c);
-                    (p.b[1].to_vec(), p.r8(0x58))
-                })).collect();
-                let moved = crt.iter().any(|x| *x != w[0]);
-                *crts.entry((cause, moved)).or_insert(0u64) += 1;
-                if k.is_some() || moved {
-                    b.2 = vec![!a.2[0]];
+                if let Some(k) = k {
+                    b.1 = w[k].0.clone();
+                    b.2 = vec![w[k].1];
                 }
             }
             let e = seen.entry(cause).or_insert((0, 0));
@@ -471,9 +414,6 @@ fn oracle_dcc_enc_undefined_classes() {
     }
     for (c, (n, dif)) in &seen {
         println!("dcc enc undefined class {}: {} native rejections, {} console outputs changed with stack smear, buffer address or caller frame/registers", c, n, dif);
-    }
-    for ((c, m), n) in &crts {
-        println!("dcc enc CRT-frame check {}: {} smear/caller-stable cases, output changed when the C runtime's vsprintf ran one frame deeper: {}", c, n, m);
     }
     for ((c, k), n) in &callers {
         println!("dcc enc caller-state check {}: {} smear-stable cases, first differing wrapper {:?}", c, n, k);

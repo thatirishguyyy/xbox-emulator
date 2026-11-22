@@ -83,8 +83,8 @@ pub unsafe extern "system" fn XMemGetWin32HeapName(heap: Handle, out: *mut u8, o
 
 #[repr(C)]
 pub struct HeapStatistics {
-    pub committed: u64,
     pub allocated: u64,
+    pub overhead: u64,
 }
 
 #[no_mangle]
@@ -97,8 +97,10 @@ pub unsafe extern "system" fn XMemGetWin32HeapStatistics(heap: Handle, out: *mut
     if HeapSummary(heap, 0, &mut s) == 0 {
         return 0;
     }
-    (*out).committed = s.committed as u64;
-    (*out).allocated = s.allocated as u64;
+    let committed = s.committed as u64;
+    let allocated = (s.allocated as u64).min(committed);
+    (*out).allocated = allocated;
+    (*out).overhead = committed - allocated;
     1
 }
 
@@ -123,10 +125,12 @@ mod tests {
         assert!(!h.is_null());
         let p = unsafe { HeapAlloc(h, 0, 0x1000) };
         assert!(!p.is_null());
-        let mut st = HeapStatistics { committed: 0, allocated: 0 };
+        let mut st = HeapStatistics { allocated: 0, overhead: 0 };
         assert_eq!(unsafe { XMemGetWin32HeapStatistics(h, &mut st) }, 1);
         assert!(st.allocated >= 0x1000);
-        assert!(st.committed >= st.allocated);
+        let mut s = HeapSummaryInfo { cb: core::mem::size_of::<HeapSummaryInfo>() as u32, ..Default::default() };
+        assert_ne!(unsafe { HeapSummary(h, 0, &mut s) }, 0);
+        assert_eq!(st.allocated + st.overhead, s.committed as u64);
         assert!(unsafe { XMemCreateWin32Heap(0x9, core::ptr::null_mut()) }.is_null());
         assert!(unsafe { XMemCreateWin32Heap(0x1, core::ptr::null_mut()) }.is_null());
     }

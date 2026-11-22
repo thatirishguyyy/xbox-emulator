@@ -1,9 +1,8 @@
 use core::ffi::c_void;
 use core::ptr::null_mut;
+use std::path::Path;
 
-pub mod repository;
-
-use repository::Lookup;
+use compat_common::gdk::emureg::{self, Hive};
 
 pub type Hkey = *mut c_void;
 
@@ -18,10 +17,6 @@ extern "system" {
 
 #[link(name = "advapi32")]
 extern "system" {
-    fn RegOpenCurrentUser(sam: u32, out: *mut Hkey) -> i32;
-    fn RegOpenKeyExW(key: Hkey, sub: *const u16, opts: u32, sam: u32, out: *mut Hkey) -> i32;
-    fn RegQueryValueExW(key: Hkey, name: *const u16, res: *mut u32, ty: *mut u32, data: *mut u8, len: *mut u32) -> i32;
-    fn RegCloseKey(key: Hkey) -> i32;
     fn GetTokenInformation(token: *mut c_void, class: u32, buf: *mut c_void, len: u32, ret: *mut u32) -> i32;
     fn ConvertStringSecurityDescriptorToSecurityDescriptorW(s: *const u16, rev: u32, sd: *mut *mut c_void, len: *mut u32) -> i32;
     fn GetSecurityDescriptorDacl(sd: *mut c_void, present: *mut i32, dacl: *mut *mut c_void, defaulted: *mut i32) -> i32;
@@ -47,8 +42,6 @@ extern "system" {
 }
 
 pub const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
-pub const HKEY_USERS: Hkey = 0x8000_0003usize as Hkey;
-pub const KEY_ALL_ACCESS: u32 = 0xf003f;
 pub const ALL_APP_PACKAGES: &str = "S-1-15-2-1";
 pub const CURRENT_THREAD_EFFECTIVE_TOKEN: *mut c_void = -6isize as *mut c_void;
 
@@ -66,6 +59,10 @@ unsafe fn wstr(p: *const u16) -> String {
 
 fn wz(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
+}
+
+pub fn data_root() -> std::path::PathBuf {
+    compat_common::gdk::data_root()
 }
 
 unsafe fn family_of(full: *const u16) -> Result<String, i32> {
@@ -104,15 +101,12 @@ pub unsafe fn effective_user() -> Result<String, i32> {
     sid_string(buf[0] as *const c_void)
 }
 
-unsafe fn resolve_user(user: *const c_void) -> Result<String, i32> {
+unsafe fn resolve_user(root: &Path, user: *const c_void) -> Result<String, i32> {
+    let me = effective_user().ok();
     let s = if user.is_null() { effective_user()? } else { sid_string(user)? };
-    let sub = wz(&s);
-    let mut k: Hkey = null_mut();
-    let r = RegOpenKeyExW(HKEY_USERS, sub.as_ptr(), 0, KEY_ALL_ACCESS, &mut k);
-    if r != 0 {
-        return Err(hresult_from_win32(r as u32));
+    if !emureg::user_hive_loaded(root, &s, me.as_deref()) {
+        return Err(hresult_from_win32(emureg::ERROR_FILE_NOT_FOUND));
     }
-    RegCloseKey(k);
     Ok(s)
 }
 
@@ -157,6 +151,34 @@ unsafe fn family_dacl(package_sid: *const u16, flags: u32, family: &str) -> Resu
     Ok(sddl)
 }
 
+pub fn families_key(sid: &str) -> String {
+    format!("{sid}\\{}", emureg::FAMILIES)
+}
+
+pub fn add_to_family_xref(root: &Path, sid: &str, family: &str, full: &str, sddl: &str, flags: u32, install_time: u64) -> Result<(), u32> {
+    let families = families_key(sid);
+    emureg::create_key(root, Hive::Hku, &families)?;
+    let fkey = format!("{families}\\{family}");
+    if emureg::create_key(root, Hive::Hku, &fkey)? {
+        emureg::set_security(root, Hive::Hku, &fkey, sddl)?;
+    }
+    let pkey = format!("{fkey}\\{full}");
+    emureg::create_key(root, Hive::Hku, &pkey)?;
+    emureg::set_value(root, Hive::Hku, &pkey, "Flags", emureg::REG_DWORD, &flags.to_le_bytes())?;
+    emureg::set_value(root, Hive::Hku, &pkey, "InstallTime", emureg::REG_QWORD, &install_time.to_le_bytes())
+}
+
+pub fn remove_from_family_xref(root: &Path, sid: &str, family: &str, full: &str) {
+    let fkey = format!("{}\\{family}", families_key(sid));
+    if !emureg::key_exists(root, Hive::Hku, &fkey) {
+        return;
+    }
+    let _ = emureg::delete_key(root, Hive::Hku, &format!("{fkey}\\{full}"));
+    if emureg::subkeys(root, Hive::Hku, &fkey).is_empty() {
+        let _ = emureg::delete_key(root, Hive::Hku, &fkey);
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "system" fn AddPackageToFamilyXref(user: *const c_void, full: *const u16, package_sid: *const u16, flags: u32, install_time: u64) -> i32 {
     if full.is_null() {
@@ -166,7 +188,8 @@ pub unsafe extern "system" fn AddPackageToFamilyXref(user: *const c_void, full: 
         Ok(f) => f,
         Err(hr) => return hr,
     };
-    let sid = match resolve_user(user) {
+    let root = data_root();
+    let sid = match resolve_user(&root, user) {
         Ok(s) => s,
         Err(hr) => return hr,
     };
@@ -174,8 +197,10 @@ pub unsafe extern "system" fn AddPackageToFamilyXref(user: *const c_void, full: 
         Ok(s) => s,
         Err(hr) => return hr,
     };
-    repository::store().add(&sid, &family, &wstr(full), &sddl, flags, install_time);
-    0
+    match add_to_family_xref(&root, &sid, &family, &wstr(full), &sddl, flags, install_time) {
+        Ok(()) => 0,
+        Err(e) => hresult_from_win32(e),
+    }
 }
 
 #[no_mangle]
@@ -187,11 +212,12 @@ pub unsafe extern "system" fn RemovePackageFromFamilyXref(user: *const c_void, f
         Ok(f) => f,
         Err(hr) => return hr,
     };
-    let sid = match resolve_user(user) {
+    let root = data_root();
+    let sid = match resolve_user(&root, user) {
         Ok(s) => s,
         Err(hr) => return hr,
     };
-    repository::store().remove(&sid, &family, &wstr(full));
+    remove_from_family_xref(&root, &sid, &family, &wstr(full));
     0
 }
 
@@ -206,10 +232,9 @@ pub const ERROR_FILE_NOT_FOUND: i32 = 2;
 pub const ERROR_INVALID_PARAMETER: i32 = 0x57;
 pub const ERROR_NOT_FOUND: i32 = 0x490;
 pub const ERROR_REGISTRY_CORRUPT_TYPE: i32 = 0x3d55;
-pub const KEY_READ: u32 = 0x20019;
 pub const REG_QWORD: u32 = 0xb;
 pub const PATH_CAP: usize = 0x128;
-pub const FAMILIES: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\Families";
+pub const FAMILIES: &str = emureg::FAMILIES;
 
 unsafe fn wlen(p: *const u16) -> usize {
     let mut n = 0;
@@ -219,11 +244,7 @@ unsafe fn wlen(p: *const u16) -> usize {
     n
 }
 
-pub unsafe fn install_time_under(root: Hkey, prefix: &str, full: *const u16, out: *mut FileTime) -> i32 {
-    install_time_with(root, prefix, full, out, None)
-}
-
-pub unsafe fn install_time_with(root: Hkey, prefix: &str, full: *const u16, out: *mut FileTime, overlay_user: Option<&str>) -> i32 {
+pub unsafe fn install_time_in(root: &Path, user: &str, prefix: &str, full: *const u16, out: *mut FileTime) -> i32 {
     if full.is_null() || out.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
@@ -233,46 +254,25 @@ pub unsafe fn install_time_with(root: Hkey, prefix: &str, full: *const u16, out:
     if r != 0 {
         return r;
     }
-    let mut path: Vec<u16> = prefix.encode_utf16().collect();
-    path.push(b'\\' as u16);
-    path.extend_from_slice(&family[..wlen(family.as_ptr())]);
-    path.push(b'\\' as u16);
-    path.extend_from_slice(core::slice::from_raw_parts(full, wlen(full)));
-    if path.len() >= PATH_CAP {
+    let fam = String::from_utf16_lossy(&family[..wlen(family.as_ptr())]);
+    let rel = format!("{prefix}\\{fam}\\{}", wstr(full));
+    if rel.encode_utf16().count() >= PATH_CAP {
         return ERROR_INVALID_PARAMETER;
     }
-    if let Some(user) = overlay_user {
-        let fam = String::from_utf16_lossy(&family[..wlen(family.as_ptr())]);
-        match repository::store().lookup(user, &fam, &wstr(full)) {
-            Lookup::Present(t) => {
-                (*out).low = t as u32;
-                (*out).high = (t >> 32) as u32;
-                return 0;
-            }
-            Lookup::Removed => return ERROR_NOT_FOUND,
-            Lookup::Untouched => {}
-        }
+    let key = format!("{user}\\{rel}");
+    if !emureg::key_exists(root, Hive::Hku, &key) {
+        return ERROR_NOT_FOUND;
     }
-    path.push(0);
-    let mut key: Hkey = null_mut();
-    let r = RegOpenKeyExW(root, path.as_ptr(), 0, KEY_READ, &mut key);
-    if r != 0 {
-        return if r == ERROR_FILE_NOT_FOUND { ERROR_NOT_FOUND } else { r };
-    }
-    let name: Vec<u16> = "InstallTime".encode_utf16().chain(Some(0)).collect();
-    let mut ty = 0u32;
-    let mut data = 0u64;
-    let mut len = 8u32;
-    let r = RegQueryValueExW(key, name.as_ptr(), null_mut(), &mut ty, &mut data as *mut u64 as *mut u8, &mut len);
-    RegCloseKey(key);
-    if r != 0 {
-        return r;
-    }
-    if ty != REG_QWORD {
+    let (ty, data) = match emureg::get_value(root, Hive::Hku, &key, "InstallTime") {
+        Ok(v) => v,
+        Err(e) => return e as i32,
+    };
+    if ty != REG_QWORD || data.len() != 8 {
         return ERROR_REGISTRY_CORRUPT_TYPE;
     }
-    (*out).low = data as u32;
-    (*out).high = (data >> 32) as u32;
+    let v = u64::from_le_bytes(data.try_into().unwrap_or_default());
+    (*out).low = v as u32;
+    (*out).high = (v >> 32) as u32;
     0
 }
 
@@ -281,78 +281,75 @@ pub unsafe extern "system" fn GetPackageInstallTime(full: *const u16, out: *mut 
     if full.is_null() || out.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    let mut user: Hkey = null_mut();
-    let r = RegOpenCurrentUser(KEY_READ, &mut user);
-    if r != 0 {
-        return r;
-    }
-    let me = effective_user().ok();
-    let r = install_time_with(user, FAMILIES, full, out, me.as_deref());
-    RegCloseKey(user);
-    r
+    let me = match effective_user() {
+        Ok(s) => s,
+        Err(hr) => return hr,
+    };
+    install_time_in(&data_root(), &me, FAMILIES, full, out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::ptr::null;
+    use std::sync::{Mutex, MutexGuard, Once};
 
-    #[link(name = "advapi32")]
-    extern "system" {
-        fn RegCreateKeyExW(key: Hkey, sub: *const u16, r: u32, class: *const u16, opts: u32, sam: u32, sa: *const c_void, out: *mut Hkey, disp: *mut u32) -> i32;
-        fn RegSetValueExW(key: Hkey, name: *const u16, r: u32, ty: u32, data: *const u8, len: u32) -> i32;
-        fn RegDeleteTreeW(key: Hkey, sub: *const u16) -> i32;
-    }
-
-    const HKCU: Hkey = 0x8000_0001usize as Hkey;
     const FULL: &str = "TomBox.Test_1.0.0.0_x64__8wekyb3d8bbwe";
     const FAMILY: &str = "TomBox.Test_8wekyb3d8bbwe";
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    fn guard() -> MutexGuard<'static, ()> {
+        static I: Once = Once::new();
+        I.call_once(|| {
+            let d = std::env::temp_dir().join(format!("tombox-kernelbase-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::env::set_var("TOMBOX_GDK_ROOT", &d);
+        });
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
-    fn seed(prefix: &str, ty: u32, data: &[u8]) {
-        unsafe {
-            let mut k: Hkey = null_mut();
-            let sub = w(&format!("{prefix}\\{FAMILY}\\{FULL}"));
-            assert_eq!(RegCreateKeyExW(HKCU, sub.as_ptr(), 0, null(), 0, 0xf003f, null(), &mut k, null_mut()), 0);
-            assert_eq!(RegSetValueExW(k, w("InstallTime").as_ptr(), 0, ty, data.as_ptr(), data.len() as u32), 0);
-            RegCloseKey(k);
-        }
+    fn seed(user: &str, prefix: &str, ty: u32, data: &[u8]) {
+        let key = format!("{user}\\{prefix}\\{FAMILY}\\{FULL}");
+        emureg::create_key(&data_root(), Hive::Hku, &key).unwrap();
+        emureg::set_value(&data_root(), Hive::Hku, &key, "InstallTime", ty, data).unwrap();
     }
 
-    fn wipe(prefix: &str) {
-        unsafe { RegDeleteTreeW(HKCU, w(prefix).as_ptr()) };
+    fn pkg_key(user: &str, family: &str, full: &str) -> String {
+        format!("{}\\{family}\\{full}", families_key(user))
     }
 
     #[test]
     fn reads_qword_from_families_key() {
-        let p = format!("Software\\TomBoxTest-{}-a", std::process::id());
-        seed(&p, REG_QWORD, &0x01d9_1234_5678_9abcu64.to_le_bytes());
+        let _g = guard();
+        let p = format!("{FAMILIES}A{}", std::process::id());
+        seed("S-1-5-21-9-9-9-1", &p, REG_QWORD, &0x01d9_1234_5678_9abcu64.to_le_bytes());
         let mut ft = FileTime::default();
-        let r = unsafe { install_time_under(HKCU, &p, w(FULL).as_ptr(), &mut ft) };
-        wipe(&p);
+        let r = unsafe { install_time_in(&data_root(), "S-1-5-21-9-9-9-1", &p, w(FULL).as_ptr(), &mut ft) };
         assert_eq!(r, 0);
         assert_eq!(ft, FileTime { low: 0x5678_9abc, high: 0x01d9_1234 });
     }
 
     #[test]
     fn wrong_type_is_corrupt_type() {
-        let p = format!("Software\\TomBoxTest-{}-b", std::process::id());
-        seed(&p, 4, &7u32.to_le_bytes());
+        let _g = guard();
+        let p = format!("{FAMILIES}B{}", std::process::id());
+        seed("S-1-5-21-9-9-9-1", &p, emureg::REG_DWORD, &7u32.to_le_bytes());
         let mut ft = FileTime { low: 9, high: 9 };
-        let r = unsafe { install_time_under(HKCU, &p, w(FULL).as_ptr(), &mut ft) };
-        wipe(&p);
+        let r = unsafe { install_time_in(&data_root(), "S-1-5-21-9-9-9-1", &p, w(FULL).as_ptr(), &mut ft) };
         assert_eq!(r, ERROR_REGISTRY_CORRUPT_TYPE);
         assert_eq!(ft, FileTime { low: 9, high: 9 });
     }
 
     #[test]
     fn absent_key_is_not_found() {
-        let p = format!("Software\\TomBoxTest-{}-c", std::process::id());
+        let _g = guard();
         let mut ft = FileTime::default();
-        assert_eq!(unsafe { install_time_under(HKCU, &p, w(FULL).as_ptr(), &mut ft) }, ERROR_NOT_FOUND);
+        assert_eq!(unsafe { install_time_in(&data_root(), "S-1-5-21-9-9-9-1", FAMILIES, w(FULL).as_ptr(), &mut ft) }, ERROR_NOT_FOUND);
     }
 
     fn unique(tag: &str) -> (String, String) {
@@ -361,48 +358,80 @@ mod tests {
     }
 
     #[test]
-    fn family_xref_add_is_read_by_get_package_install_time() {
+    fn family_xref_writes_the_emulated_hku_store_with_dacl_flags_and_install_time() {
+        let _g = guard();
         let (full, family) = unique("A");
         let fw = w(&full);
         let mut ft = FileTime::default();
+        let root = data_root();
         unsafe {
+            let me = effective_user().unwrap();
             assert_eq!(GetPackageInstallTime(fw.as_ptr(), &mut ft), ERROR_NOT_FOUND);
             assert_eq!(AddPackageToFamilyXref(null(), fw.as_ptr(), null(), 1, 0x01d9_1234_5678_9abc), 0);
             assert_eq!(GetPackageInstallTime(fw.as_ptr(), &mut ft), 0);
             assert_eq!(ft, FileTime { low: 0x5678_9abc, high: 0x01d9_1234 });
-            let me = effective_user().unwrap();
-            let fam = repository::store().family(&me, &family).unwrap();
-            assert_eq!(fam.packages.values().next().unwrap().flags, 1);
+            let pk = pkg_key(&me, &family, &full);
+            assert!(root.join("hku").join(&me).is_dir());
+            assert_eq!(emureg::get_value(&root, Hive::Hku, &pk, "Flags"), Ok((emureg::REG_DWORD, 1u32.to_le_bytes().to_vec())));
+            assert_eq!(emureg::get_value(&root, Hive::Hku, &pk, "InstallTime"), Ok((emureg::REG_QWORD, 0x01d9_1234_5678_9abcu64.to_le_bytes().to_vec())));
             let mut sid: *mut c_void = null_mut();
             assert!(DeriveAppContainerSidFromAppContainerName(w(&family).as_ptr(), &mut sid) >= 0);
             let cap = String::from_utf16_lossy(&capability_form(sid_string(sid).unwrap().encode_utf16().collect()));
             FreeSid(sid);
             assert!(cap.starts_with("S-1-15-3-"));
-            assert_eq!(fam.dacl_sddl, format!("D:AR(A;OICI;KR;;;S-1-15-2-1)(A;OICI;KR;;;{cap})"));
-            assert_eq!(AddPackageToFamilyXref(null(), fw.as_ptr(), null(), 0, 0x0000_0002_0000_0001), 0);
+            let fkey = format!("{}\\{family}", families_key(&me));
+            assert_eq!(emureg::get_security(&root, Hive::Hku, &fkey).unwrap(), format!("D:AR(A;OICI;KR;;;S-1-15-2-1)(A;OICI;KR;;;{cap})"));
+            let h = compat_common::gdk::hook::emulated_open_at(&root, 0x8000_0003, &pk, Some(&me)).unwrap().unwrap();
+            let (mut kind, mut cb, mut v) = (0u32, 8u32, 0u64);
+            assert_eq!(compat_common::gdk::hook::emulated_query_at(&root, h, w("InstallTime").as_ptr(), &mut kind, &mut v as *mut u64 as *mut u8, &mut cb), Some(0));
+            assert_eq!((kind, v), (REG_QWORD, 0x01d9_1234_5678_9abc));
+            assert_eq!(compat_common::gdk::hook::emulated_close(h), Some(0));
+            assert_eq!(AddPackageToFamilyXref(null(), fw.as_ptr(), w("S-1-15-2-1").as_ptr(), 0, 0x0000_0002_0000_0001), 0);
             assert_eq!(GetPackageInstallTime(fw.as_ptr(), &mut ft), 0);
             assert_eq!(ft, FileTime { low: 1, high: 2 });
+            assert_eq!(emureg::get_security(&root, Hive::Hku, &fkey).unwrap(), format!("D:AR(A;OICI;KR;;;S-1-15-2-1)(A;OICI;KR;;;{cap})"), "the DACL is applied only when the family key is created");
             assert_eq!(RemovePackageFromFamilyXref(null(), fw.as_ptr()), 0);
             assert_eq!(GetPackageInstallTime(fw.as_ptr(), &mut ft), ERROR_NOT_FOUND);
-            assert!(repository::store().family(&me, &family).is_none());
+            assert!(!emureg::key_exists(&root, Hive::Hku, &fkey));
             assert_eq!(RemovePackageFromFamilyXref(null(), fw.as_ptr()), 0);
         }
     }
 
     #[test]
+    fn family_keeps_other_packages_on_remove() {
+        let _g = guard();
+        let n = format!("TomBox.XrefE{}", std::process::id());
+        let a = format!("{n}_1.0.0.0_x64__8wekyb3d8bbwe");
+        let b = format!("{n}_2.0.0.0_x64__8wekyb3d8bbwe");
+        let family = format!("{n}_8wekyb3d8bbwe");
+        unsafe {
+            let me = effective_user().unwrap();
+            assert_eq!(AddPackageToFamilyXref(null(), w(&a).as_ptr(), null(), 0, 1), 0);
+            assert_eq!(AddPackageToFamilyXref(null(), w(&b).as_ptr(), null(), 0, 2), 0);
+            assert_eq!(RemovePackageFromFamilyXref(null(), w(&a).as_ptr()), 0);
+            let fkey = format!("{}\\{family}", families_key(&me));
+            assert_eq!(emureg::subkeys(&data_root(), Hive::Hku, &fkey), vec![b.clone()]);
+            assert_eq!(RemovePackageFromFamilyXref(null(), w(&b).as_ptr()), 0);
+            assert!(!emureg::key_exists(&data_root(), Hive::Hku, &fkey));
+        }
+    }
+
+    #[test]
     fn family_xref_flags_two_uses_all_app_packages() {
+        let _g = guard();
         let (full, family) = unique("B");
         let fw = w(&full);
         unsafe {
             assert_eq!(AddPackageToFamilyXref(null(), fw.as_ptr(), w("not-a-sid").as_ptr(), 2, 5), 0);
-            let fam = repository::store().family(&effective_user().unwrap(), &family).unwrap();
-            assert_eq!(fam.dacl_sddl, "D:AR(A;OICI;KR;;;S-1-15-2-1)(A;OICI;KR;;;S-1-15-3-1)");
+            let fkey = format!("{}\\{family}", families_key(&effective_user().unwrap()));
+            assert_eq!(emureg::get_security(&data_root(), Hive::Hku, &fkey).unwrap(), "D:AR(A;OICI;KR;;;S-1-15-2-1)(A;OICI;KR;;;S-1-15-3-1)");
             assert_eq!(RemovePackageFromFamilyXref(null(), fw.as_ptr()), 0);
         }
     }
 
     #[test]
     fn family_xref_bad_package_sid_is_converter_error() {
+        let _g = guard();
         let (full, _) = unique("C");
         let fw = w(&full);
         let mut ft = FileTime::default();
@@ -415,6 +444,7 @@ mod tests {
 
     #[test]
     fn family_xref_argument_and_name_errors_are_hresults() {
+        let _g = guard();
         let bad = w("not a package name");
         unsafe {
             assert_eq!(AddPackageToFamilyXref(null(), null(), null(), 0, 0), E_INVALIDARG);
@@ -429,17 +459,19 @@ mod tests {
     }
 
     #[test]
-    fn family_xref_other_user_is_not_the_current_user() {
-        let (full, _) = unique("D");
+    fn family_xref_other_user_goes_to_that_users_emulated_hive() {
+        let _g = guard();
+        let (full, family) = unique("D");
         let fw = w(&full);
         let mut ft = FileTime::default();
         let system: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
         unsafe {
-            let hr = AddPackageToFamilyXref(system.as_ptr() as *const c_void, fw.as_ptr(), null(), 0, 9);
-            assert!(hr == 0 || hr == hresult_from_win32(5), "{hr:#x}");
+            assert_eq!(AddPackageToFamilyXref(system.as_ptr() as *const c_void, fw.as_ptr(), null(), 0, 9), 0);
+            assert!(emureg::key_exists(&data_root(), Hive::Hku, &pkg_key("S-1-5-18", &family, &full)));
             assert_eq!(GetPackageInstallTime(fw.as_ptr(), &mut ft), ERROR_NOT_FOUND);
             let ghost: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 0x78, 0x56, 0x34, 0x12];
             assert_eq!(AddPackageToFamilyXref(ghost.as_ptr() as *const c_void, fw.as_ptr(), null(), 0, 9), hresult_from_win32(2));
+            assert_eq!(RemovePackageFromFamilyXref(system.as_ptr() as *const c_void, fw.as_ptr()), 0);
         }
     }
 
@@ -453,8 +485,9 @@ mod tests {
 
     #[test]
     fn overlong_path_is_invalid_parameter() {
+        let _g = guard();
         let p = "x".repeat(PATH_CAP);
         let mut ft = FileTime::default();
-        assert_eq!(unsafe { install_time_under(HKCU, &p, w(FULL).as_ptr(), &mut ft) }, ERROR_INVALID_PARAMETER);
+        assert_eq!(unsafe { install_time_in(&data_root(), "S-1-5-18", &p, w(FULL).as_ptr(), &mut ft) }, ERROR_INVALID_PARAMETER);
     }
 }

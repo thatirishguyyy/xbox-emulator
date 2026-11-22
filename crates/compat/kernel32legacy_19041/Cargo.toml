@@ -3,7 +3,7 @@ name = "kernel32legacy_19041"
 version = "0.1.0"
 edition = "2021"
 description = "kernel32legacy compat DLL for console OS build 10.0.19041 (Fortnite): the same code as crates/compat/kernel32legacy with the 19041 ordinal table (299 exports; BackupSeek, IsSystemResumeAutomatic, RequestWakeupLatency and SetSystemPowerState absent like the console DLL)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "../kernel32legacy/build.rs"
 
 [lib]

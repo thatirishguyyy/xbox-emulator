@@ -311,11 +311,79 @@ pub(crate) fn color_in(d: &mut Dcc, t: &mut Tmp) -> Result<(), i32> {
     let cm = color_mode(d);
     color(d)?;
     if cm != 1 {
-        t.b[56..64].copy_from_slice(&8u64.to_le_bytes());
-        for p in 0..64 {
-            t.ever[p] = p >= 56 || (t.ever[p] && (16..48).contains(&p));
+        if crate::dcc::xg_build() == 22000 {
+            t.b[56..64].copy_from_slice(&8u64.to_le_bytes());
+            t.b[54] = 0;
+            t.b[55] = 0;
+            for p in 0..64 {
+                t.ever[p] = p >= 54 || (t.ever[p] && (16..48).contains(&p));
+            }
+        } else {
+            t.ever = [false; 64];
         }
     }
+    Ok(())
+}
+
+pub(crate) fn channel_in(d: &mut Dcc, t: &mut Tmp) -> Result<(), i32> {
+    let v48 = d.r32(0x48);
+    channel(d)?;
+    if v48 != 0 && v48 != 0xc {
+        let (written, zero): (&[core::ops::Range<usize>], &[usize]) = match crate::dcc::xg_build() {
+            22000 => (&[0..64], &[39, 44, 45, 46, 47, 54, 55]),
+            22621 => (&[0..36, 40..56], &[46, 47]),
+            _ => (&[0..64], &[]),
+        };
+        for r in written {
+            for p in r.clone() {
+                t.ever[p] = false;
+            }
+        }
+        for &p in zero {
+            t.b[p] = 0;
+            t.ever[p] = true;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn conv_residue(p: Option<usize>) -> ([u8; 64], [bool; 64]) {
+    if crate::dcc::xg_build() == 19041 {
+        return ([0; 64], [true; 64]);
+    }
+    let mut b = [0u8; 64];
+    b[0] = 0x3d;
+    b[8..16].fill(0xff);
+    b[48] = 0x3d;
+    b[56] = 0x32;
+    let mut k = [true; 64];
+    match p {
+        Some(v) => b[16..24].copy_from_slice(&(v as u64).to_le_bytes()),
+        None => k[16..22].fill(false),
+    }
+    (b, k)
+}
+
+pub(crate) fn run_model(d: &mut Dcc, fills: &[[u8; 64]; 3], conv: &[u8; 64]) -> Result<(), i32> {
+    d.w64(0x13c0, 0);
+    d.w32(0xf0, 0);
+    let mut t = Tmp::with(Some(fills[0]));
+    relay_in(d, 2, 0, 1, &mut t)?;
+    clear_detect(d)?;
+    channel_in(d, &mut t)?;
+    signfix(d)?;
+    t.fill = Some(fills[1]);
+    relay_in(d, 2, 2, 2, &mut t)?;
+    color_in(d, &mut t)?;
+    t.fill = Some(fills[2]);
+    relay_in(d, 2, 2, 3, &mut t)?;
+    delta(d)?;
+    vrs_with(d, Some(*conv))?;
+    choose(d)?;
+    far(d)?;
+    subbed(d)?;
+    plan(d)?;
+    pack(d)?;
     Ok(())
 }
 
@@ -576,7 +644,7 @@ pub(crate) fn vrs_with(d: &mut Dcc, fill: Option<[u8; 64]>) -> Result<bool, i32>
 }
 
 fn vrs_body(d: &mut Dcc, fill: Option<[u8; 64]>) -> Result<bool, i32> {
-    let mut t = Tmp::with(fill);
+    let mut hit = false;
     let fl = variant_flag(d);
     d.w8(0x394, fl);
     let top = if fl != 0 { 3usize } else { 0 };
@@ -596,7 +664,9 @@ fn vrs_body(d: &mut Dcc, fill: Option<[u8; 64]>) -> Result<bool, i32> {
             _ => (0, 4),
         };
         d.w32(0x12c0, val);
+        let mut t = Tmp::with(fill);
         tid_in(d, &mut t)?;
+        hit |= t.hit;
         let o = 0xb99 + v * 0x100;
         let b = d.b[2];
         d.m[o..o + 256].copy_from_slice(&b);
@@ -609,7 +679,7 @@ fn vrs_body(d: &mut Dcc, fill: Option<[u8; 64]>) -> Result<bool, i32> {
             d.m[0x10dc + 32 * v + e as usize] = a as u8;
         }
     }
-    Ok(t.hit)
+    Ok(hit)
 }
 
 pub(crate) fn choose(d: &mut Dcc) -> Result<(), i32> {
@@ -1227,6 +1297,161 @@ pub fn run_with(d: &mut Dcc, fill: Option<[u8; 64]>, conv: Option<[u8; 64]>) -> 
     plan(d)?;
     pack(d)?;
     Ok(t.hit || h)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RAND: std::cell::Cell<(u64, u32)> = const { std::cell::Cell::new((0, 0)) };
+    pub(crate) static POS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn scramble(site: usize, t: &mut Tmp, hs: &[usize]) {
+    let (mut x, mask) = RAND.with(|r| r.get());
+    if mask >> site & 1 == 0 {
+        return;
+    }
+    let only = POS.with(|q| q.get());
+    for &p in hs {
+        if site == 3 && !(16..24).contains(&p) && only.is_none() {
+            continue;
+        }
+        if only.is_some_and(|q| q != p) {
+            continue;
+        }
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        t.b[p] = x as u8;
+    }
+    RAND.with(|r| r.set((x, mask)));
+}
+
+#[cfg(test)]
+pub(crate) fn lay_holes(d: &Dcc, maps: &[Option<(u32, u32)>; 4]) -> Vec<usize> {
+    let mut ever = [false; 64];
+    let mut first = true;
+    let mut v = Vec::new();
+    for k in 0..4u32 {
+        if !seg(d, k).unwrap_or(false) {
+            continue;
+        }
+        let Some((from, to)) = maps[k as usize] else { continue };
+        for a in k * 64..k * 64 + 64 {
+            if let Ok(c) = get(d, a, from) {
+                if let Ok(b) = set(d, &c, to) {
+                    ever[(b & 63) as usize] = true;
+                }
+            }
+        }
+        if first {
+            v = (0..64).filter(|&p| !ever[p]).collect();
+            first = false;
+        }
+    }
+    v
+}
+
+#[cfg(test)]
+pub(crate) fn run_feed(d: &mut Dcc, rel: &[[u8; 64]; 3], conv: &mut dyn FnMut() -> [u8; 64]) -> Result<(), i32> {
+    run_feed_log(d, rel, conv, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub(crate) fn run_feed_log(d: &mut Dcc, rel: &[[u8; 64]; 3], conv: &mut dyn FnMut() -> [u8; 64], log: &mut Vec<(usize, Vec<usize>)>) -> Result<(), i32> {
+    d.w64(0x13c0, 0);
+    d.w32(0xf0, 0);
+    let mut t = Tmp::with(None);
+    let mut put = |t: &mut Tmp, b: &[u8; 64]| {
+        t.b = *b;
+        t.ever = [true; 64];
+    };
+    let h = |d: &Dcc, m: u32| lay_holes(d, &[Some((d.r32(0xf0), m)); 4]);
+    put(&mut t, &rel[0]);
+    log.push((0, h(d, 1)));
+    scramble(0, &mut t, &log.last().unwrap().1.clone());
+    relay_in(d, 2, 0, 1, &mut t)?;
+    clear_detect(d)?;
+    channel(d)?;
+    signfix(d)?;
+    put(&mut t, &rel[1]);
+    log.push((1, h(d, 2)));
+    scramble(1, &mut t, &log.last().unwrap().1.clone());
+    relay_in(d, 2, 2, 2, &mut t)?;
+    color(d)?;
+    put(&mut t, &rel[2]);
+    log.push((2, h(d, 3)));
+    scramble(2, &mut t, &log.last().unwrap().1.clone());
+    relay_in(d, 2, 2, 3, &mut t)?;
+    delta(d)?;
+    let sb = d.r32(4);
+    if sb == 16 {
+        d.w32(4, 8);
+    }
+    let r = vrs_feed(d, conv, log);
+    d.w32(4, sb);
+    r?;
+    choose(d)?;
+    far(d)?;
+    subbed(d)?;
+    plan(d)?;
+    pack(d)?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn vrs_feed(d: &mut Dcc, conv: &mut dyn FnMut() -> [u8; 64], log: &mut Vec<(usize, Vec<usize>)>) -> Result<(), i32> {
+    let fl = variant_flag(d);
+    d.w8(0x394, fl);
+    let top = if fl != 0 { 3usize } else { 0 };
+    let en = [1u8, d.r8(0x43), d.r8(0x44), d.r8(0x45)];
+    for v in (0..=top).rev() {
+        if en[v] == 0 {
+            continue;
+        }
+        let src = 0x499 + if v == 3 { 0x200 } else { 0 };
+        let b: [u8; 256] = d.m[src..src + 256].try_into().unwrap();
+        d.b[2] = b;
+        d.w32(0xf0, 3);
+        let (val, sm) = match v {
+            1 => (0x55, 8),
+            2 => (0xaa, 10),
+            3 => (0xff, 9),
+            _ => (0, 4),
+        };
+        d.w32(0x12c0, val);
+        let mut t = Tmp::with(None);
+        t.b = conv();
+        t.ever = [true; 64];
+        let al = d.r32(0x12c0);
+        let mut maps = [None; 4];
+        for k in 0..4 {
+            let sm = match (al as u8 as u32 >> (2 * k)) & 3 {
+                1 => 8,
+                2 => 10,
+                3 => 9,
+                _ => 4,
+            };
+            if sm != 3 {
+                maps[k] = Some((3, sm));
+            }
+        }
+        log.push((3, lay_holes(d, &maps)));
+        scramble(3, &mut t, &log.last().unwrap().1.clone());
+        tid_in(d, &mut t)?;
+        let o = 0xb99 + v * 0x100;
+        let b = d.b[2];
+        d.m[o..o + 256].copy_from_slice(&b);
+        let a: Vec<u8> = d.m[0x34c..0x38c].to_vec();
+        d.m[0xf99 + 32 * v..0xf99 + 32 * v + 32].copy_from_slice(&a[..32]);
+        d.m[0x1019 + 32 * v..0x1019 + 32 * v + 32].copy_from_slice(&a[32..]);
+        for e in 0..32u32 {
+            let c = get(d, (8 * e) & 0xff, 4)?;
+            let a = set(d, &c, sm)?;
+            d.m[0x10dc + 32 * v + e as usize] = a as u8;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn subbed(d: &mut Dcc) -> Result<(), i32> {

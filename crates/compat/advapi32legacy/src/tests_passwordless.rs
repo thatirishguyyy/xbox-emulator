@@ -1,7 +1,7 @@
 use super::passwordless::*;
 use std::path::PathBuf;
 
-const FN_LSASRV: &str = r"D:\xbox-pc-port\games\Fortnite\extracted\EmbeddedXvd\Windows\System32\lsasrv.dll";
+const XD_LSASRV: &str = r"D:\xbox-pc-port\games\XDefiant\extracted\EmbeddedXvd\Windows\System32\lsasrv.dll";
 const XD_ADVAPI32LEGACY: &str = r"D:\xbox-pc-port\games\XDefiant\extracted\EmbeddedXvd\Windows\System32\advapi32legacy.dll";
 
 fn temp(tag: &str) -> PathBuf {
@@ -30,13 +30,57 @@ fn rva_bytes(path: &str, rva: u32, n: usize) -> Option<Vec<u8>> {
 }
 
 #[test]
-fn opnum_policy_matches_console_lsasrv_table() {
-    let Some(b) = rva_bytes(FN_LSASRV, 0x15e4f0 + 8 * 0x7e, 16) else { return };
-    let e = |o: usize| OpnumPolicy { protseq_mask: u32::from_le_bytes(b[o..o + 4].try_into().unwrap()), flags: b[o + 4] };
-    assert_eq!(e(0), LSARPC_POLICY_7E);
-    assert_eq!(e(8), LSARPC_POLICY_7F);
-    let auth = rva_bytes(FN_LSASRV, 0x15ed74, 8).unwrap();
-    assert_eq!(&auth[..6], &[0, 0, 0, 0, 0, 5]);
+fn opnum_policy_matches_xdefiant_lsasrv_table() {
+    let Some(b) = rva_bytes(XD_LSASRV, LSARPC_POLICY_RVA, 8 * (LSARPC_OPNUM_LIMIT as usize + 1)) else {
+        eprintln!("{XD_LSASRV} not present; table checked against the embedded copy only");
+        assert_eq!(LSARPC_POLICY_7E, OpnumPolicy { protseq_mask: 8, flags: 3 });
+        return;
+    };
+    for op in 0..LSARPC_OPNUM_LIMIT as usize {
+        let o = op * 8;
+        let flags = u32::from_le_bytes(b[o + 4..o + 8].try_into().unwrap());
+        assert!(flags < 0x100, "opnum {op:#x} flags {flags:#x}");
+        assert_eq!(LSARPC_POLICY[op], OpnumPolicy { protseq_mask: u32::from_le_bytes(b[o..o + 4].try_into().unwrap()), flags: flags as u8 }, "opnum {op:#x}");
+    }
+    let sentinel = LSARPC_OPNUM_LIMIT as usize * 8;
+    assert_eq!(u32::from_le_bytes(b[sentinel + 4..sentinel + 8].try_into().unwrap()), u32::MAX);
+    assert_eq!(LSARPC_POLICY_7E, OpnumPolicy { protseq_mask: 8, flags: 3 });
+    assert_eq!(LSARPC_POLICY_7F, OpnumPolicy { protseq_mask: 8, flags: 3 });
+    let code = rva_bytes(XD_LSASRV, 0x395e2, 9).unwrap();
+    assert_eq!(&code[..5], &[0xb8, 0x86, 0x00, 0x00, 0x00]);
+}
+
+#[test]
+fn caller_token_is_the_real_thread_or_process_token() {
+    let t = TitleToken::caller();
+    assert_eq!(t.membership_error, 0);
+    assert!(t.user.starts_with("S-1-"), "{}", t.user);
+    assert_ne!(t.user, "", "caller SID");
+    assert!(t.check_membership(SID_AUTHENTICATED_USERS) || t.user == "S-1-5-18");
+    assert!(!t.is_app_container);
+    assert_eq!(security_callback(&CallAttributes::console_client(OPNUM_ENABLE), opnum_policy(OPNUM_ENABLE), &t), 0);
+}
+
+#[test]
+fn user_config_branch_writes_under_the_caller_sid() {
+    let d = temp("callersid");
+    let h = Hklm::at(&d);
+    h.create_key(IMAGE_CUSTOMIZATION_KEY).unwrap();
+    h.set_dword(IMAGE_CUSTOMIZATION_KEY, FORCE_DISABLE_VALUE, 1).unwrap();
+    let t = TitleToken::caller();
+    assert_eq!(lsarpc_call(&h, OPNUM_ENABLE, &CallAttributes::console_client(OPNUM_ENABLE), &t), 0);
+    assert_eq!(h.get_dword(&format!("{USER_CONFIG_KEY}{}", t.user), USER_CONFIG_VALUE), Ok(1));
+    if t.user != "S-1-5-18" {
+        assert!(h.get_dword(&format!("{USER_CONFIG_KEY}S-1-5-18"), USER_CONFIG_VALUE).is_err());
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn token_without_authenticated_users_is_denied() {
+    let t = TitleToken::caller();
+    let stripped = TitleToken { groups: t.groups.iter().filter(|g| *g != SID_AUTHENTICATED_USERS).cloned().collect(), user: "S-1-5-21-1-2-3-500".into(), ..t };
+    assert_eq!(security_callback(&CallAttributes::console_client(OPNUM_ENABLE), opnum_policy(OPNUM_ENABLE), &stripped), ERROR_ACCESS_DENIED);
 }
 
 #[test]
@@ -63,7 +107,8 @@ fn security_callback_follows_console_gate() {
         assert_eq!(security_callback(&CallAttributes { authentication_level: level, ..ok }, p, &t), ERROR_ACCESS_DENIED);
     }
     assert_eq!(security_callback(&CallAttributes { authentication_level: 5, ..ok }, p, &t), 0);
-    assert_eq!(security_callback(&CallAttributes { opnum: 0x81, ..ok }, p, &t), RPC_S_PROCNUM_OUT_OF_RANGE);
+    assert_eq!(security_callback(&CallAttributes { opnum: 0x86, ..ok }, opnum_policy(0x86), &t), RPC_S_PROCNUM_OUT_OF_RANGE);
+    assert_eq!(security_callback(&CallAttributes { opnum: 0x81, ..ok }, opnum_policy(0x81), &t), 0);
     assert_eq!(security_callback(&ok, Some(OpnumPolicy { protseq_mask: 8, flags: 7 }), &t), RPC_S_PROCNUM_OUT_OF_RANGE);
     let app = TitleToken { is_app_container: true, ..t.clone() };
     assert_eq!(security_callback(&ok, p, &app), ERROR_ACCESS_DENIED);
@@ -131,5 +176,57 @@ fn failed_registry_write_maps_like_the_console_server() {
     let h = Hklm::at(&d);
     let st = server_body(&h, true, &TitleToken::console_title());
     assert!(st < 0 && (st as u32) & 0xffff_0000 == 0xC007_0000, "{st:#x}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn OpenProcessToken(process: isize, access: u32, token: *mut isize) -> i32;
+    fn CreateRestrictedToken(existing: isize, flags: u32, disable_count: u32, disable: *const [usize; 2], delete_count: u32, delete: *const u8, restrict_count: u32, restrict: *const u8, out: *mut isize) -> i32;
+    fn DuplicateToken(existing: isize, level: u32, out: *mut isize) -> i32;
+    fn SetThreadToken(thread: *const isize, token: isize) -> i32;
+    fn RevertToSelf() -> i32;
+    fn ConvertStringSidToSidW(s: *const u16, sid: *mut *mut u8) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> isize;
+    fn CloseHandle(h: isize) -> i32;
+    fn LocalFree(p: *mut u8) -> *mut u8;
+}
+
+#[test]
+fn real_caller_token_without_authenticated_users_is_denied_end_to_end() {
+    let d = temp("restricted");
+    std::env::set_var("TOMBOX_GDK_ROOT", &d);
+    let h = Hklm::at(d.join("hklm"));
+    unsafe {
+        let mut proc_tok = 0isize;
+        assert_ne!(OpenProcessToken(GetCurrentProcess(), 0x000b, &mut proc_tok), 0);
+        let mut sid: *mut u8 = core::ptr::null_mut();
+        let s: Vec<u16> = SID_AUTHENTICATED_USERS.encode_utf16().chain(Some(0)).collect();
+        assert_ne!(ConvertStringSidToSidW(s.as_ptr(), &mut sid), 0);
+        let disable = [sid as usize, 0usize];
+        let mut restricted = 0isize;
+        assert_ne!(CreateRestrictedToken(proc_tok, 0, 1, &disable, 0, core::ptr::null(), 0, core::ptr::null(), &mut restricted), 0);
+        let mut imp = 0isize;
+        assert_ne!(DuplicateToken(restricted, 2, &mut imp), 0);
+        assert_ne!(SetThreadToken(core::ptr::null(), imp), 0);
+        let t = TitleToken::caller();
+        let st = lsarpc_call(&h, OPNUM_ENABLE, &CallAttributes::console_client(OPNUM_ENABLE), &t);
+        let exported = LsaEnablePasswordLessCurrentUser();
+        assert_ne!(RevertToSelf(), 0);
+        assert!(!t.check_membership(SID_AUTHENTICATED_USERS), "{t:?}");
+        assert_eq!(st, 0xC000_0022u32 as i32);
+        assert_eq!(exported, 0xC000_0022u32 as i32);
+        assert!(h.get_dword(DEVICE_KEY, DEVICE_VALUE).is_err());
+        let after = TitleToken::caller();
+        assert!(after.check_membership(SID_AUTHENTICATED_USERS));
+        LocalFree(sid);
+        CloseHandle(imp);
+        CloseHandle(restricted);
+        CloseHandle(proc_tok);
+    }
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -260,3 +260,47 @@ fn ansi_window_wndproc_reads_back_registered_proc() {
         UnregisterClassA(name.as_ptr(), inst);
     }
 }
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetWindowTextW(h: *mut c_void, buf: *mut u16, n: i32) -> i32;
+    fn IsWindowVisible(h: *mut c_void) -> i32;
+    fn DefWindowProcW(h: *mut c_void, m: u32, w: usize, l: isize) -> isize;
+}
+
+unsafe extern "system" fn proc_w(h: *mut c_void, m: u32, w: usize, l: isize) -> isize {
+    DefWindowProcW(h, m, w, l)
+}
+
+#[test]
+fn utf8_ansi_windows_are_unicode_by_name() {
+    type RegA = unsafe extern "system" fn(*const WndClassExA) -> u16;
+    type CreateA = unsafe extern "system" fn(u32, *const u8, *const u8, u32, i32, i32, i32, i32, *mut c_void, *mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
+    type CreateW = unsafe extern "system" fn(u32, *const u16, *const u16, u32, i32, i32, i32, i32, *mut c_void, *mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
+    type Show = unsafe extern "system" fn(*mut c_void, i32) -> i32;
+    let reg: RegA = unsafe { core::mem::transmute(export("RegisterClassExA")) };
+    let create_a: CreateA = unsafe { core::mem::transmute(export("CreateWindowExA")) };
+    let create_w: CreateW = unsafe { core::mem::transmute(export("CreateWindowExW")) };
+    let show: Show = unsafe { core::mem::transmute(export("ShowWindow")) };
+    unsafe {
+        let inst = GetModuleHandleW(null_mut());
+        let name = b"TomboxMuxUtf8\0";
+        let c = WndClassExA { size: core::mem::size_of::<WndClassExA>() as u32, style: 0, proc_: proc_w as usize, cls_extra: 0, wnd_extra: 0, inst, icon: null_mut(), cursor: null_mut(), bg: null_mut(), menu: core::ptr::null(), name: name.as_ptr(), icon_sm: null_mut() };
+        assert_ne!(reg(&c), 0);
+        let h = create_a(0, name.as_ptr(), "Trackmania \u{e9}\0".as_ptr(), 0, 0, 0, 10, 10, null_mut(), null_mut(), inst, null_mut());
+        assert!(!h.is_null());
+        assert_ne!(IsWindowUnicode(h), 0);
+        let mut buf = [0u16; 64];
+        let n = GetWindowTextW(h, buf.as_mut_ptr(), 64) as usize;
+        assert!(String::from_utf16_lossy(&buf[..n]).ends_with("Trackmania \u{e9}"));
+        show(h, 5);
+        assert_ne!(IsWindowVisible(h), 0);
+        DestroyWindow(h);
+        let wname: Vec<u16> = "TomboxMuxUtf8\0".encode_utf16().collect();
+        let t: Vec<u16> = "w\0".encode_utf16().collect();
+        let h = create_w(0, wname.as_ptr(), t.as_ptr(), 0, 0, 0, 10, 10, null_mut(), null_mut(), inst, null_mut());
+        assert!(!h.is_null());
+        DestroyWindow(h);
+        UnregisterClassA(name.as_ptr(), inst);
+    }
+}

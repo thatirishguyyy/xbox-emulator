@@ -297,3 +297,67 @@ fn image_mimg_store_mip() {
     }
     run_mem_cases("mimg_store_mip", &cs);
 }
+
+fn h16(x: f32) -> u32 {
+    let b = x.to_bits();
+    let s = (b >> 16) & 0x8000;
+    let a = b & 0x7fff_ffff;
+    let r = a - 0x3800_0000;
+    s | ((r + 0xfff + ((r >> 13) & 1)) >> 13)
+}
+
+fn d16(op: [u32; 2]) -> [u32; 2] {
+    [op[0], op[1] | 0x8000_0000]
+}
+
+fn pack16(vals: &[u32]) -> Vec<u32> {
+    vals.chunks(2).map(|p| h16(f32::from_bits(p[0])) | p.get(1).map_or(0, |&v| h16(f32::from_bits(v)) << 16)).collect()
+}
+
+#[test]
+fn image_mimg_d16_packs_halves() {
+    let mut cs = Vec::new();
+    let tex = || Env { tex: Some(&IMG_A), samp: ptsamp(), ..Default::default() };
+    for &dmask in &[0xfu32, 0x7, 0x5, 0x2] {
+        let (u, v) = (0.45f32, 0.3f32);
+        let op = d16(mimg(0x27, dmask, 1, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, fb(u)).vv(2, fb(v));
+        let (x, y) = pt(0, u, v, (0, 0));
+        let n = dmask.count_ones().div_ceil(2);
+        cs.push(case("image_sample_lz", op, build(&pre, &op, 4, n, false), tex(), pack16(&pick(ea(0, x, y), dmask))));
+    }
+    for &(x, y, dmask) in &[(3u32, 3u32, 0xfu32), (2, 5, 0xb), (7, 0, 0x8)] {
+        let op = d16(mimg(0x00, dmask, 1, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, x).vv(2, y);
+        let n = dmask.count_ones().div_ceil(2);
+        cs.push(case("image_load", op, build(&pre, &op, 4, n, false), tex(), pack16(&pick(ea(0, x, y), dmask))));
+    }
+    for &(x, y, dmask) in &[(2u32, 3u32, 0xfu32), (5, 1, 0x7), (0, 6, 0x6)] {
+        let op = d16(mimg(0x08, dmask, 1, 1, 4, 16, 0));
+        let vals = [1.5f32, -2.25, 0.125, 65504.0];
+        let on: Vec<f32> = (0..4).filter(|c| (dmask >> c) & 1 != 0).map(|c| vals[c]).collect();
+        let regs = pack16(&on.iter().map(|v| fb(*v)).collect::<Vec<_>>());
+        let mut pre = Prog::new();
+        pre.vv(1, x).vv(2, y);
+        for (k, r) in regs.iter().enumerate() {
+            pre.vv(4 + k as u32, *r);
+        }
+        let base = ((y * 8 + x) * 4) as usize;
+        let mut k = 0usize;
+        let uav = (0..4)
+            .map(|c| {
+                let w = if (dmask >> c) & 1 != 0 {
+                    k += 1;
+                    fb(on[k - 1])
+                } else {
+                    0
+                };
+                (0usize, base + c, w)
+            })
+            .collect();
+        cs.push(MCase { m: "image_store", op: op.to_vec(), words: build(&pre, &op, 4, 0, true), env: Env { uav: Some(&IMG_U), ..Default::default() }, rt: vec![], uav, tol: 0.0 });
+    }
+    run_mem_cases("mimg_d16", &cs);
+}

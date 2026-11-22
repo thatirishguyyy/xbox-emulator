@@ -13,7 +13,8 @@ pub const E_NO_TASK_QUEUE: i32 = 0x8007_01ABu32 as i32;
 pub const ALL_CLIENTS: u64 = u64::MAX;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
-static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONNECTION_TOKEN: AtomicU64 = AtomicU64::new(1);
+static NEXT_PROPERTIES_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -24,6 +25,10 @@ enum Kind {
 fn registrations() -> &'static Mutex<Vec<(Kind, u64)>> {
     static R: Mutex<Vec<(Kind, u64)>> = Mutex::new(Vec::new());
     &R
+}
+
+pub fn registration_count() -> usize {
+    registrations().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 pub fn initialized() -> bool {
@@ -49,7 +54,9 @@ unsafe extern "system" fn initialize(_t: This) -> i32 {
 }
 
 unsafe extern "system" fn uninitialize(_t: This) {
+    let mut r = registrations().lock().unwrap_or_else(|e| e.into_inner());
     INITIALIZED.store(false, Ordering::Release);
+    r.clear();
 }
 
 unsafe extern "system" fn is_streaming(_t: This) -> bool {
@@ -64,7 +71,11 @@ unsafe fn register(kind: Kind, cb: usize, token: *mut u64) -> i32 {
     if cb == 0 || token.is_null() {
         return E_POINTER;
     }
-    let t = NEXT_TOKEN.fetch_add(1, Ordering::AcqRel);
+    let counter = match kind {
+        Kind::Connection => &NEXT_CONNECTION_TOKEN,
+        Kind::Properties(_) => &NEXT_PROPERTIES_TOKEN,
+    };
+    let t = counter.fetch_add(1, Ordering::AcqRel);
     registrations().lock().unwrap_or_else(|e| e.into_inner()).push((kind, t));
     *token = t;
     S_OK

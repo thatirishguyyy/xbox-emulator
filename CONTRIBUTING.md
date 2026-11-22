@@ -43,4 +43,4 @@ Some crates also need third-party SDKs (the DirectX Agility SDK, DXC, libopus). 
 
 ## Licence
 
-Contributions are accepted under the project licence: MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+Contributions are accepted under the project licence: GPL-3.0-or-later. See [LICENSE](LICENSE). Code from GPL-3.0 projects may be used with its copyright notices kept and recorded in the crate's `THIRD_PARTY` file; GPL-2.0-only code is not compatible and must not be copied.

@@ -3,7 +3,7 @@ name = "advapi32"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console System32\\forwarders\\advapi32.dll exports a PC advapi32 lacks: PE forwarders to sechost (event-trace consumer) and to the emulator's advapi32legacy (Elf* event log), as the console API sets resolve."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

@@ -3,7 +3,7 @@ name = "werxboxgc"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console WerXboxGc.dll (Windows Error Reporting Xbox Support): crash-store mount, report metadata, package identity and the WER transport, kept in a local store under the emulator data dir and never uploaded."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "werxboxgc"

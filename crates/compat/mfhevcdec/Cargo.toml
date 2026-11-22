@@ -3,7 +3,7 @@ name = "mfhevcdec"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console mfhevcdec.dll: WRL module exports and the CLSID_MSH265DecoderMFT class as a native IMFTransform that parses HEVC (VPS/SPS/PPS/slice headers, RPS, POC, DPB) and decodes on the GPU through D3D12 Video Decode (DXVA HEVC picture parameters, quantisation matrix, short slice control), producing D3D12 NV12 samples."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

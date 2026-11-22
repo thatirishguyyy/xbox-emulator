@@ -3,7 +3,7 @@ name = "mflnmhelp"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console mflnmhelp.dll: the Win32 helper shims Media Foundation uses on the console, ported from the console bodies."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

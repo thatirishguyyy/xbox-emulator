@@ -2,7 +2,7 @@
 name = "ttdrecordcpu"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 description = "Console ttdrecordcpu.dll exports the PC TTD recorder lacks: GetRegisterOffsets and RegisterInstrumentationCallbacks, ported from the console build 1.10.41 (identical in 1.9.138)."
 
 [lib]

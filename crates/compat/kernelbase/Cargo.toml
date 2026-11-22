@@ -3,13 +3,16 @@ name = "kernelbase"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console KernelBase.dll exports a PC KernelBase lacks."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]
 name = "kernelbase"
 crate-type = ["cdylib"]
 path = "src/lib.rs"
+
+[dependencies]
+compat-common = { path = "../compat-common" }
 
 [build-dependencies]
 xone-exports = { path = "../xone-exports" }

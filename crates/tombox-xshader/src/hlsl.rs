@@ -31,6 +31,10 @@ mod amp;
 mod global;
 mod centroid;
 mod image_bindings;
+mod durango;
+mod mixed;
+mod mimg_d16;
+use mimg_d16::{mimg_data_regs, Lane};
 
 pub struct Translated {
     pub hlsl: String,
@@ -85,6 +89,30 @@ const XYZW: [&str; 4] = ["x", "y", "z", "w"];
 /// face-local S/T, face index 0..5 = +X,-X,+Y,-Y,+Z,-Z). Hardware cube sampling takes
 /// (s, t, face) with s,t = sc/|ma| + 1.5 (so each is in [1, 2]); `tb_cube_dir` inverts that
 /// to the direction vector HLSL TextureCube sampling expects.
+pub fn f16_exact(v: f32) -> bool {
+    let b = v.to_bits() & 0x7fff_ffff;
+    if b == 0 {
+        return true;
+    }
+    if b >= 0x7f80_0000 {
+        return b == 0x7f80_0000;
+    }
+    let e = (b >> 23) as i32 - 127;
+    if !(-24..=15).contains(&e) {
+        return false;
+    }
+    let keep = if e >= -14 { 10 } else { 10 - (-14 - e) };
+    let m = b & 0x7f_ffff;
+    m & ((1u32 << (23 - keep)) - 1) == 0
+}
+
+pub fn fma16_operands_exact(ops: &[Opnd]) -> bool {
+    ops.iter().all(|o| match o {
+        Opnd::ConstF32(x) => f16_exact(*x),
+        _ => true,
+    })
+}
+
 pub(crate) const CUBE_HELPERS: &str = r#"uint tb_perm_byte(uint hi, uint lo, uint sel) { if (sel >= 13u) return 0xffu; if (sel == 12u) return 0u; if (sel == 11u) return (hi >> 31) * 0xffu; if (sel == 10u) return ((hi >> 15) & 1u) * 0xffu; if (sel == 9u) return (lo >> 31) * 0xffu; if (sel == 8u) return ((lo >> 15) & 1u) * 0xffu; return sel >= 4u ? ((hi >> ((sel - 4u) * 8u)) & 0xffu) : ((lo >> (sel * 8u)) & 0xffu); }
 uint tb_perm(uint hi, uint lo, uint sel) { return tb_perm_byte(hi, lo, sel & 0xffu) | (tb_perm_byte(hi, lo, (sel >> 8) & 0xffu) << 8) | (tb_perm_byte(hi, lo, (sel >> 16) & 0xffu) << 16) | (tb_perm_byte(hi, lo, sel >> 24) << 24); }
 bool tb_cmp_class(uint b, uint mask) { uint e = (b >> 23) & 0xffu; uint m = b & 0x7fffffu; bool neg = (b >> 31) != 0u; uint c; if (e == 0xffu) { c = (m != 0u) ? (((m & 0x400000u) != 0u) ? 1u : 0u) : (neg ? 2u : 9u); } else if (e == 0u) { c = (m == 0u) ? (neg ? 5u : 6u) : (neg ? 4u : 7u); } else { c = neg ? 3u : 8u; } return ((mask >> c) & 1u) != 0u; }uint tb_bfe_i32(uint a, uint b) { uint o = b & 31u, w = (b >> 16) & 127u; if (w == 0u) return 0u; if (w + o >= 32u) return asuint(asint(a) >> o); return asuint(asint(a << (32u - w - o)) >> (32u - w)); }uint tb_mulhi_u32(uint a, uint b) { uint a0 = a & 0xffffu, a1 = a >> 16, b0 = b & 0xffffu, b1 = b >> 16; uint p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1; uint mid = (p00 >> 16) + (p01 & 0xffffu) + (p10 & 0xffffu); return p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16); }
@@ -99,9 +127,13 @@ int tb_nrm(float v, uint k) { uint b = asuint(v); uint a = b & 0x7fffffffu; if (
 float tb_rev(float x) { return (abs(x) < 0.5) ? x : x - round(x); }
 float tb_ldexp32(float x, int e) { int k = clamp(e, -330, 330); return (float)((double)x * asdouble(0u, (uint)(k + 1023) << 20)); }
 float tb_rto(double s) { float f = (float)s; if ((double)f != s) { uint u = asuint(f); if (abs((double)f) > abs(s)) u -= 1u; f = asfloat(u | 1u); } return f; }
+float tb_fma16(float a, float b, float c) { precise float p = a * b; precise float s = p + c; if ((asuint(s) & 0x7fffffffu) >= 0x7f800000u) return s; precise float bb = s - p; precise float e = (p - (s - bb)) + (c - bb); uint u = asuint(s); if (e != 0.0) { if ((e > 0.0) != (s > 0.0)) u -= 1u; u |= 1u; } return asfloat(u); }
+float tb_fma_rto(float a, float b, float c) { precise double p = (double)a * (double)b; precise double q = (double)c; precise double s = p + q; if (!(abs(s) < 1.0e300)) return (float)s; precise double bb = s - p; precise double e = (p - (s - bb)) + (q - bb); float f = (float)s; uint u = asuint(f); if ((double)f != s) { if (abs((double)f) > abs(s)) u -= 1u; u |= 1u; } else if (e != 0.0) { if ((e > 0.0) != (s > 0.0)) u -= 1u; u |= 1u; } return asfloat(u); }
 float tb_mull(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }
 #ifdef TB_FAST_FMA
 float tb_fma(float a, float b, float c) { precise float r = mad(a, b, c); uint m = 0x7fffffffu; uint xa = asuint(a) & m, xb = asuint(b) & m, xc = asuint(c) & m; if (max(max(xa, xb), xc) > 0x7f800000u) return asfloat(((xa > 0x7f800000u) ? asuint(a) : ((xb > 0x7f800000u) ? asuint(b) : asuint(c))) | 0x400000u); return ((asuint(r) & m) > 0x7f800000u) ? asfloat(0x7fc00000u) : r; }
+#elif defined(TB_HYBRID_FMA)
+float tb_fma(float a, float b, float c) { precise float r0 = mad(a, b, c); uint m0 = 0x7fffffffu; uint ya = asuint(a) & m0, yb = asuint(b) & m0, yc = asuint(c) & m0, yr = asuint(r0) & m0; if ((ya == 0u || (ya >= 0x00800000u && ya < 0x7f800000u)) && (yb == 0u || (yb >= 0x00800000u && yb < 0x7f800000u)) && (yc == 0u || (yc >= 0x00800000u && yc < 0x7f800000u)) && (ya == 0u || yb == 0u || (ya >> 23) + (yb >> 23) >= 129u) && yr >= 0x01000000u && yr < 0x7f000000u) return r0; precise double p = (double)a * (double)b; precise double dc = (double)c; precise double s = p + dc; precise double bb = s - p; precise double e = (p - (s - bb)) + (dc - bb); uint lo, hi; asuint(s, lo, hi); uint fin = (uint)(abs(s) < 1.0e300); uint adj = fin & (uint)(e != 0.0) & (~lo & 1u); uint dn = adj & (uint)((e > 0.0) != (s > 0.0)); precise float r = (float)asdouble(lo + adj - 2u * dn, hi - (dn & (uint)(lo == 0u))); uint m = 0x7fffffffu; float q = ((asuint(r) & m) > 0x7f800000u) ? asfloat(0x7fc00000u) : r; float sp = (max(max(asuint(a) & m, asuint(b) & m), asuint(c) & m) > 0x7f800000u) ? asfloat((((asuint(a) & m) > 0x7f800000u) ? asuint(a) : (((asuint(b) & m) > 0x7f800000u) ? asuint(b) : asuint(c))) | 0x400000u) : q; return ((fin | (uint)(abs(p) < 1.0e300)) != 0u) ? r : sp; }
 #else
 float tb_fma(float a, float b, float c) { precise double p = (double)a * (double)b; precise double dc = (double)c; precise double s = p + dc; precise double bb = s - p; precise double e = (p - (s - bb)) + (dc - bb); uint lo, hi; asuint(s, lo, hi); uint fin = (uint)(abs(s) < 1.0e300); uint adj = fin & (uint)(e != 0.0) & (~lo & 1u); uint dn = adj & (uint)((e > 0.0) != (s > 0.0)); precise float r = (float)asdouble(lo + adj - 2u * dn, hi - (dn & (uint)(lo == 0u))); uint m = 0x7fffffffu; float q = ((asuint(r) & m) > 0x7f800000u) ? asfloat(0x7fc00000u) : r; float sp = (max(max(asuint(a) & m, asuint(b) & m), asuint(c) & m) > 0x7f800000u) ? asfloat((((asuint(a) & m) > 0x7f800000u) ? asuint(a) : (((asuint(b) & m) > 0x7f800000u) ? asuint(b) : asuint(c))) | 0x400000u) : q; return ((fin | (uint)(abs(p) < 1.0e300)) != 0u) ? r : sp; }
 #endif
@@ -111,7 +143,11 @@ float tb_u2f(uint a) { precise float r = (float)(a & 0xffff0000u) + (float)(a & 
 float tb_log(float x) { return tb_qn((asuint(x) == 0x7f800000u) ? x : log2(x)); }
 float tb_fsub(float a, float b) { precise float r = a - b; return tb_qn(r); }
 float tb_fract(float x) { if ((asuint(x) & 0x7fffffffu) >= 0x7f800000u) return asfloat(0x7fc00000u); precise float f = x - floor(x); return min(f, asfloat(0x3f7fffffu)); }
+#ifdef TB_FAST_F2H
+uint tb_f2h(float x) { uint b = asuint(x); return (b & 0x7fffffffu) > 0x7f800000u ? (((b >> 16) & 0x8000u) | 0x7e00u | ((b >> 13) & 0x3ffu)) : (uint)asuint16((float16_t)x); }
+#else
 uint tb_f2h(float x) { uint b = asuint(x); uint s = (b >> 16) & 0x8000u; uint a = b & 0x7fffffffu; if (a > 0x7f800000u) return s | 0x7e00u | ((a >> 13) & 0x3ffu); if (a >= 0x477ff000u) return s | 0x7c00u; if (a >= 0x38800000u) { uint r = a - 0x38000000u; return s | ((r + 0xfffu + ((r >> 13) & 1u)) >> 13); } if (a < 0x33000000u) return s; uint e = a >> 23; uint m = (a & 0x7fffffu) | 0x800000u; uint sh = 126u - e; uint q = m >> sh; uint rem = m & ((1u << sh) - 1u); uint hf = 1u << (sh - 1u); if (rem > hf || (rem == hf && (q & 1u) != 0u)) q += 1u; return s | q; }
+#endif
 float tb_rne(float x) { float a = abs(x); if (!(a < 8388608.0)) return x; float r = floor(a); float f = a - r; if (f > 0.5 || (f == 0.5 && (((uint)r) & 1u) != 0u)) r += 1.0; return asfloat(asuint(r) | (asuint(x) & 0x80000000u)); }
 uint tb_cvt_i(float x) { if (tb_nan(x)) return 0u; if (x >= 2147483648.0) return 0x7fffffffu; if (x <= -2147483648.0) return 0x80000000u; return asuint((int)x); }
 uint tb_cvt_u(float x) { if (tb_nan(x) || x <= 0.0) return 0u; if (x >= 4294967296.0) return 0xffffffffu; return (uint)x; }
@@ -312,7 +348,6 @@ struct Emitter<'a> {
     brace_depth: i32,
     /// Shader reads constant tables embedded in its code section.
     uses_code: bool,
-    /// The program uses register-relative moves: VGPRs live in the `tb_v` array.
     vreg_array: bool,
     d16: Option<(String, bool)>,
     /// Interned candidate lists `(table, offset)` for `Sym::Multi`.
@@ -342,6 +377,7 @@ struct Emitter<'a> {
     /// VS parameter-export index -> output register.
     out_params: Vec<u32>,
     user_base_override: Option<usize>,
+    durango: Option<Vec<(u32, u32)>>,
     rm_mode: std::cell::Cell<Option<bool>>,
     rm_loads: BTreeMap<usize, u32>,
     rm_used: BTreeSet<usize>,
@@ -381,6 +417,19 @@ const OP_WAVE_SCAN: u32 = 0x7ff1;
 
 pub const TB_MIP_SPACE: u32 = 4_000_000;
 pub const TB_GMEM_SPACE: u32 = 4_000_001;
+pub const TB_BLALIAS_SPACE: u32 = 4_200_000;
+pub const BL_ALIASES: u32 = 6;
+
+pub fn bl_alias_space(k: u32, space: u32) -> u32 {
+    TB_BLALIAS_SPACE + (k - 1) * 100_000 + space
+}
+
+fn bl_name(table: u8, key: usize) -> String {
+    match key >> 16 {
+        0 => format!("tb_bl{table}_{}", key & 0xffff),
+        k => format!("tb_bl{table}_{}_a{k}", key & 0xffff),
+    }
+}
 
 const BVH_HELPERS: &str = r#"ByteAddressBuffer tb_gmem : register(t0, spaceTB_GMEM_SPACE);
 cbuffer TbGmem : register(b0, spaceTB_GMEM_SPACE) { uint4 tb_gmem_base; };
@@ -946,6 +995,7 @@ fn translate_with(ex: &ShaderExtract, image_layouts: &[crate::psocache::BindingL
         })),
         out_params: distinct_regs(ex.output_sig.iter().filter(|e| e.sysval == 0)),
         user_base_override,
+        durango: durango::layout(ex)?,
         rm_mode: std::cell::Cell::new(None),
         rm_loads: BTreeMap::new(),
         rm_used: BTreeSet::new(),
@@ -1091,6 +1141,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn root_param_at(&self, sgpr: u8, base: usize) -> Option<(usize, u32)> {
+        if let Some(r) = self.dg_slot(sgpr) {
+            return r;
+        }
         let mut at = (sgpr as usize).checked_sub(base)? as u32;
         for (i, p) in self.ex.root_sig.as_ref()?.params.iter().enumerate() {
             let n = match &p.kind {
@@ -1157,18 +1210,37 @@ impl<'a> Emitter<'a> {
             starts.push(s);
         }
         let mut out = String::new();
-        let ri = match used.iter().find(|u| u.0 == ty && u.1 == table) {
+        let key = match used.iter().find(|u| u.0 == ty && u.1 == table) {
             Some(u) => u.2,
             None => {
-                let ri = (0..ranges.len())
-                    .find(|&i| ranges[i].range_type == range_type && ranges[i].num == u32::MAX && !used.iter().any(|u| u.1 == table && u.2 == i))
-                    .ok_or_else(|| format!("bindless: no free unbounded range of type {range_type} in table s{table} for {ty}"))?;
-                used.push((ty.to_string(), table, ri));
-                out.push_str(&format!("{ty} tb_bl{table}_{ri}[] : register({class}{}, space{});\n", ranges[ri].base_register, ranges[ri].space));
-                ri
+                let of_type: Vec<usize> = (0..ranges.len()).filter(|&i| ranges[i].range_type == range_type).collect();
+                let unb: Vec<usize> = of_type.iter().copied().filter(|&i| ranges[i].num == u32::MAX).collect();
+                let cands = match (unb.len(), of_type.len()) {
+                    (0, 1) => of_type,
+                    (0, n) => return Err(format!("bindless: table s{table} has {n} bounded ranges of type {range_type} and no unbounded one for {ty}")),
+                    _ => unb,
+                };
+                let bounded = ranges[cands[0]].num != u32::MAX;
+                let key = match cands.iter().copied().find(|&i| !bounded && !used.iter().any(|u| u.1 == table && u.2 & 0xffff == i)) {
+                    Some(ri) => ri,
+                    None => {
+                        let ri = cands[0];
+                        let k = used.iter().filter(|u| u.1 == table && u.2 & 0xffff == ri).count() + usize::from(bounded);
+                        if k > BL_ALIASES as usize {
+                            return Err(format!("bindless: more than {} HLSL types share unbounded range {ri} of table s{table}", BL_ALIASES + 1));
+                        }
+                        ri | (k << 16)
+                    }
+                };
+                used.push((ty.to_string(), table, key));
+                let (ri, k) = (key & 0xffff, (key >> 16) as u32);
+                let space = if k == 0 { ranges[ri].space } else { bl_alias_space(k, ranges[ri].space) };
+                let len = if ranges[ri].num == u32::MAX { String::new() } else { ranges[ri].num.to_string() };
+                out.push_str(&format!("{ty} {}[{len}] : register({class}{}, space{space});\n", bl_name(table, key), ranges[ri].base_register));
+                key
             }
         };
-        out.push_str(&format!("#define {name} tb_bl{table}_{ri}[tb_bi{n} / {stride}u - {}u]\n", starts[ri]));
+        out.push_str(&format!("#define {name} {}[tb_bi{n} / {stride}u - {}u]\n", bl_name(table, key), starts[key & 0xffff]));
         Ok(out)
     }
 
@@ -1417,7 +1489,7 @@ impl<'a> Emitter<'a> {
                         Res::Uav(s, _) => (s, true),
                         _ => unreachable!(),
                     };
-                    let comps = (ins.aux.mask & 0xf).count_ones() as u8;
+                    let comps = mimg_data_regs(ins) as u8;
                     let regs = (0..comps).map(|k| vd.wrapping_add(k)).collect();
                     let load = matches!(ins.mnemonic.as_str(), "image_load" | "image_load_mip");
                     Some(((true, is_uav, slot), regs, load, ins.mnemonic.starts_with("image_store")))
@@ -1640,12 +1712,12 @@ impl<'a> Emitter<'a> {
 
     /// Resource a MUBUF instruction addresses when its descriptor is `slot` of `table`
     /// (also records declaration requirements).
-    fn mubuf_res(&mut self, ins: &Insn, slot: u32, table: u8) -> Result<Res, String> {
+    fn mubuf_res(&mut self, ins: &Insn, slot: u32, table: u8, off: u32) -> Result<Res, String> {
         if ins.enc == Enc::Mtbuf {
-            return self.mtbuf_res(ins, slot, table);
+            return self.mtbuf_res(ins, slot, table, off);
         }
         let writes = ins.mnemonic.contains("store") || ins.mnemonic.contains("atomic") || self.uav_force.contains(&slot);
-        let kind = self.table_kind_for(table, writes);
+        let kind = self.kind_at(table, off, writes)?;
         if slot & BINDLESS != 0 && kind.is_some_and(|k| k <= 1) {
             if kind == Some(1) { self.bl_uav.insert(slot); } else { self.bl_srv.insert(slot); }
         }
@@ -1849,6 +1921,7 @@ impl<'a> Emitter<'a> {
                         written.insert(d);
                     }
                 }
+                Enc::Sop1 if ins.mnemonic == "s_swappc_b64" && self.durango.is_some() => {}
                 Enc::Sop1 if ins.mnemonic == "s_getpc_b64" => {
                     if let Some(d) = ins.dst.first().and_then(sg) {
                         sym.insert(d, Sym::Code);
@@ -1890,6 +1963,7 @@ impl<'a> Emitter<'a> {
                     let table = match sym.get(&b) {
                         Some(Sym::Table(t)) => *t,
                         None if !written.contains(&b) => b as u8,
+                        Some(Sym::Desc { table, off, k }) if self.dg_table_ptr(*table, *off, *k).is_some() => self.dg_table_ptr(*table, *off, *k).unwrap_or(0),
                         other => {
                             return Err(format!(
                                 "s_load at {:#x}: base s{b} is not a root table pointer ({other:?})",
@@ -1949,7 +2023,7 @@ impl<'a> Emitter<'a> {
                     // spherical-harmonics buffer read by ReflectionEnvironmentSkyLighting.
                     // Only the unambiguous case is handled; with several candidate
                     // descriptors the load is still treated as a constant buffer (debt).
-                    let buffer_kind = if cands.len() == 1 { self.table_kind_for(cands[0].0, false).filter(|k| *k <= 1) } else { None };
+                    let buffer_kind = if cands.len() == 1 { self.kind_at(cands[0].0, cands[0].1, false)?.filter(|k| *k <= 1) } else { None };
                     for (table, off) in &cands {
                         let slot = self.bind_id(*table, *off, 32);
                         if let Some(k) = buffer_kind {
@@ -1985,7 +2059,7 @@ impl<'a> Emitter<'a> {
                     let mut out: Vec<(u32, Res)> = Vec::new();
                     for (table, off) in &cands {
                         let slot = self.bind_id(*table, *off, 32);
-                        out.push((((*table as u32) << 24) | off, self.mubuf_res(ins, slot, *table)?));
+                        out.push((((*table as u32) << 24) | off, self.mubuf_res(ins, slot, *table, *off)?));
                     }
                     self.res.insert(idx, vec![out[0].1]);
                     if out.len() > 1 {
@@ -2021,7 +2095,10 @@ impl<'a> Emitter<'a> {
                         let binding = self.image_binding(*ttable, *off, types)?;
                         let tslot = binding.map_or_else(|| self.bind_id(*ttable, *off, 32), |(slot, _)| slot);
                         let writes = ins.mnemonic.contains("store") || ins.mnemonic.contains("atomic") || self.uav_force.contains(&tslot);
-                        let is_uav = binding.map_or_else(|| self.table_kind_for(*ttable, writes) == Some(1), |(_, ty)| ty == 6);
+                        let is_uav = match binding {
+                            Some((_, ty)) => ty == 6,
+                            None => self.kind_at(*ttable, *off, writes)? == Some(1),
+                        };
                         if tslot & BINDLESS != 0 {
                             if is_uav { self.bl_uav.insert(tslot); } else { self.bl_srv.insert(tslot); }
                         }
@@ -2038,11 +2115,20 @@ impl<'a> Emitter<'a> {
                     }
                     let mut samp_res: Vec<(u32, Res)> = Vec::new();
                     if ins.mnemonic.starts_with("image_sample") || ins.mnemonic.starts_with("image_gather") || ins.mnemonic == "image_get_lod" {
-                        let samp_c = self.desc_candidates(sym.get(&ss), 16).ok_or_else(|| {
-                            format!("mimg at {:#x}: s{ss} not a sampler descriptor ({:?})", ins.offset, sym.get(&ss))
-                        })?;
+                        let fixed = if sym.get(&ss).is_none() && written.contains(&ss) { self.dg_static_sampler(idx, ss)? } else { None };
+                        let samp_c = match fixed {
+                            Some(slot) => vec![(0xffu8, slot)],
+                            None => self.desc_candidates(sym.get(&ss), 16).ok_or_else(|| {
+                                format!("mimg at {:#x}: s{ss} not a sampler descriptor ({:?})", ins.offset, sym.get(&ss))
+                            })?,
+                        };
                         for (stable, off) in &samp_c {
-                            let sslot = self.image_binding(*stable, *off, &[1])?.map_or_else(|| self.bind_id(*stable, *off, 16), |(slot, _)| slot);
+                            let sslot = if fixed.is_some() {
+                                *off
+                            } else {
+                                self.image_binding(*stable, *off, &[1])?
+                                    .map_or_else(|| self.bind_id(*stable, *off, 16), |(slot, _)| slot)
+                            };
                             // Depth-compare variants (opcode bit 3) need a comparison sampler.
                             if ins.op & 8 != 0 {
                                 self.samp_cmp.insert(sslot);
@@ -2104,7 +2190,7 @@ impl<'a> Emitter<'a> {
             let extra = match ins.enc {
                 Enc::Smem if matches!(ins.op, 0x24 | 0x25) => 1,
                 Enc::Smem => (1u32 << (ins.op & 7)) - 1,
-                Enc::Mimg => (ins.aux.mask.count_ones()).saturating_sub(1),
+                Enc::Mimg => mimg_data_regs(ins).saturating_sub(1),
                 _ if ins.mnemonic.ends_with("_b64") => 1,
                 _ => 0,
             };
@@ -3691,8 +3777,23 @@ impl<'a> Emitter<'a> {
                 }
                 let attr = ins.aux.imm as usize;
                 let chan = ins.aux.imm2 as usize;
-                let reg = *self.ps_attrs.get(attr).ok_or_else(|| format!("PS attr{attr} has no signature register"))?;
-                let val = if let Some((ei, k)) = sig_lookup(&self.ex.input_sig, reg, chan) {
+                let (reg, layer) = match self.ps_attrs.get(attr) {
+                    Some(r) => (*r, false),
+                    None => (
+                        *distinct_regs(self.ex.input_sig.iter().filter(|e| matches!(e.sysval, 4 | 5) && e.rw_mask != 0))
+                            .get(attr - self.ps_attrs.len())
+                            .ok_or_else(|| format!("PS attr{attr} has no signature register"))?,
+                        true,
+                    ),
+                };
+                let found = if layer {
+                    self.ex.input_sig.iter().enumerate().find_map(|(ei, e)| {
+                        (matches!(e.sysval, 4 | 5) && e.register == reg && (e.mask >> chan) & 1 != 0).then(|| (ei, (e.mask & ((1u8 << chan) - 1)).count_ones() as usize))
+                    })
+                } else {
+                    sig_lookup(&self.ex.input_sig, reg, chan)
+                };
+                let val = if let Some((ei, k)) = found {
                     let acc = format!("i.i{ei}.{}", XYZW[k]);
                     if self.ex.input_sig[ei].comp_type == 3 { format!("asuint({acc})") } else { format!("(uint)({acc})") }
                 } else if chan == 3 {
@@ -4046,27 +4147,19 @@ impl<'a> Emitter<'a> {
             let x = h16(&s[0])?;
             return self.wv(&d, &format!("(tb_nan({x}) ? 0u : (asuint((int)clamp({x}, -32768.0, 32767.0)) & 0xffffu))"));
         }
-        if matches!(m.as_str(), "v_madak_f16" | "v_madmk_f16") {
-            // The trailing literal dword carries the half-float constant K in its low bits.
+        if matches!(m.as_str(), "v_fma_f16" | "v_fmac_f16" | "v_fmamk_f16" | "v_fmaak_f16") {
             let k = format!("f16tof32({:#x}u)", ins.raw.last().copied().unwrap_or(0) & 0xffff);
-            let (a, b) = (h16(&s[0])?, h16(&s[1])?);
-            let (a, b, k) = (format!("tb_hz({a})"), format!("tb_hz({b})"), format!("tb_hz({k})"));
-            let (x, y, z) = if m == "v_madak_f16" { (a, b, k) } else { (a, k, b) };
-            let t = self.tmp;
-            self.tmp += 1;
-            self.line(&format!("precise float t{t}m = {x} * {y}; precise float t{t} = tb_hz(f16tof32(tb_f2h(t{t}m))) + {z};"));
-            return self.wv(&d, &format!("tb_hzb({})", hres(format!("t{t}"))));
-        }
-        if m == "v_mac_f16" {
-            self.touch(&d);
-            let t = self.tmp;
-            self.tmp += 1;
-            self.line(&format!("precise float t{t}m = tb_hz({}) * tb_hz({}); precise float t{t} = tb_hz(f16tof32(tb_f2h(t{t}m))) + tb_hz({});", h16(&s[0])?, h16(&s[1])?, h16(&d)?));
-            return self.wv(&d, &format!("tb_hzb({})", hres(format!("t{t}"))));
-        }
-        if m == "v_fma_f16" {
-            let e = format!("tb_rto((double)({}) * (double)({}) + (double)({}))", h16(&s[0])?, h16(&s[1])?, h16(&s[2])?);
-            return self.wv(&d, &hres(e));
+            let (x, y, z, exact) = match m.as_str() {
+                "v_fma_f16" => (h16(&s[0])?, h16(&s[1])?, h16(&s[2])?, fma16_operands_exact(&s[..2])),
+                "v_fmac_f16" => {
+                    self.touch(&d);
+                    (h16(&s[0])?, h16(&s[1])?, h16(&d)?, fma16_operands_exact(&s[..2]))
+                }
+                "v_fmaak_f16" => (h16(&s[0])?, h16(&s[1])?, k, fma16_operands_exact(&s[..2])),
+                _ => (h16(&s[0])?, k, h16(&s[1])?, fma16_operands_exact(&s[..1])),
+            };
+            let f = if exact { "tb_fma16" } else { "tb_fma_rto" };
+            return self.wv(&d, &hres(format!("{f}({x}, {y}, {z})")));
         }
         if matches!(m.as_str(), "v_pk_fma_f16" | "v_pk_add_f16" | "v_pk_mul_f16" | "v_pk_min_f16" | "v_pk_max_f16") {
             // Packed half-float ops (VOP3P): two f16 lanes per register. For the low result,
@@ -4092,7 +4185,7 @@ impl<'a> Emitter<'a> {
                     v.push(e);
                 }
                 halves.push(match m.as_str() {
-                    "v_pk_fma_f16" => format!("tb_rto((double)({}) * (double)({}) + (double)({}))", v[0], v[1], v[2]),
+                    "v_pk_fma_f16" => format!("tb_fma16({}, {}, {})", v[0], v[1], v[2]),
                     "v_pk_add_f16" => format!("{} + {}", v[0], v[1]),
                     "v_pk_mul_f16" => format!("{} * {}", v[0], v[1]),
                     "v_pk_min_f16" => format!("min({}, {})", v[0], v[1]),
@@ -4389,9 +4482,6 @@ impl<'a> Emitter<'a> {
             return self.wv(&d, &format!("tb_bfe_i32({a}, (({o}) & 31u) | ((({w}) & 31u) << 16))"));
         }
         if matches!(m.as_str(), "v_movrels_b32" | "v_movreld_b32" | "v_movrelsd_b32") {
-            // Register-relative moves: the source and/or destination VGPR number is offset by
-            // M0 at run time (local arrays kept in registers). Lowered to a chain over every
-            // VGPR the program uses.
             let (Opnd::Vgpr(dn), Opnd::Vgpr(sn)) = (d, s[0]) else {
                 return Err("register-relative move with a non-VGPR operand".into());
             };
@@ -4400,10 +4490,27 @@ impl<'a> Emitter<'a> {
             }
             let t = self.tmp;
             self.tmp += 1;
-            let src = if m == "v_movreld_b32" { format!("tb_v[{sn}]") } else { format!("tb_v[({sn}u + m0) & 255u]") };
-            self.line(&format!("uint t{t} = {src};"));
-            let dst = if m == "v_movrels_b32" { format!("tb_v[{dn}]") } else { format!("tb_v[({dn}u + m0) & 255u]") };
-            self.line(&format!("if (exec_lo & 1u) {dst} = t{t};"));
+            if m == "v_movreld_b32" {
+                self.line(&format!("uint t{t} = v{sn};"));
+            } else {
+                self.line(&format!("uint t{t} = 0u;"));
+                self.line(&format!("switch (({sn}u + m0) & 255u) {{"));
+                for k in 0..256 {
+                    self.line(&format!("case {k}u: t{t} = v{k}; break;"));
+                }
+                self.line("}");
+            }
+            if m == "v_movrels_b32" {
+                self.line(&format!("if (exec_lo & 1u) v{dn} = t{t};"));
+            } else {
+                self.line("if (exec_lo & 1u) {");
+                self.line(&format!("switch (({dn}u + m0) & 255u) {{"));
+                for k in 0..256 {
+                    self.line(&format!("case {k}u: v{k} = t{t}; break;"));
+                }
+                self.line("}");
+                self.line("}");
+            }
             return Ok(());
         }
         if matches!(m.as_str(), "v_fma_mix_f32" | "v_fma_mixlo_f16" | "v_fma_mixhi_f16") {
@@ -4433,7 +4540,7 @@ impl<'a> Emitter<'a> {
                 }
                 v.push(e);
             }
-            let e = format!("{} * {} + {}", v[0], v[1], v[2]);
+            let e = format!("{}({}, {}, {})", if opsel_hi & 3 == 3 { "tb_fma16" } else { "tb_fma_rto" }, v[0], v[1], v[2]);
             return match m.as_str() {
                 "v_fma_mix_f32" => self.wv(&d, &format!("asuint(tb_fma({}, {}, {}))", v[0], v[1], v[2])),
                 // The f16 result replaces one half of the destination; the other half is kept.
@@ -5387,23 +5494,17 @@ impl<'a> Emitter<'a> {
                 return self.wv(&o, &format!("t{t}"));
             }
             if store && as_uint {
-                let o = Opnd::Vgpr(vd);
-                self.touch(&o);
-                self.line(&format!("if (exec_lo & 1u) {uobj}[uint{ncoord}({})] = {};", c.join(", "), r(&o)?));
+                let v = self.mimg_store_lanes(ins, vd, Lane::Uint, "0u")?;
+                let first_on = (0..4).find(|ch| (ins.aux.mask >> ch) & 1 != 0).unwrap_or(0);
+                self.line(&format!("if (exec_lo & 1u) {uobj}[uint{ncoord}({})] = {};", c.join(", "), v[first_on]));
                 return Ok(());
             }
             if !store && as_uint {
                 let t = self.tmp;
                 self.tmp += 1;
                 self.line(&format!("uint4 t{t} = uint4({uobj}[uint{ncoord}({})], 0u, 0u, 0u);", c.join(", ")));
-                let mut n = 0u8;
-                for ch in 0..4 {
-                    if (ins.aux.mask >> ch) & 1 != 0 {
-                        self.wv(&Opnd::Vgpr(vd + n), &format!("t{t}.{}", XYZW[ch]))?;
-                        n += 1;
-                    }
-                }
-                return Ok(());
+                let vals = (0..4).filter(|ch| (ins.aux.mask >> ch) & 1 != 0).map(|ch| format!("t{t}.{}", XYZW[ch])).collect();
+                return self.mimg_write_lanes(ins, vd, vals, Lane::Uint);
             }
             let ity = self.img_ty.get(&(is_uav, slot)).copied();
             if store {
@@ -5411,35 +5512,12 @@ impl<'a> Emitter<'a> {
                     return Err("image_store to a non-UAV table".into());
                 }
                 if let Some(t) = ity {
-                    // Integer texels: the registers are stored as they are.
-                    let mut comp = vec![];
-                    let mut n = 0u8;
-                    for ch in 0..4 {
-                        if (ins.aux.mask >> ch) & 1 != 0 {
-                            let o = Opnd::Vgpr(vd + n);
-                            self.touch(&o);
-                            comp.push(r(&o)?);
-                            n += 1;
-                        } else {
-                            comp.push("0u".into());
-                        }
-                    }
+                    let comp = self.mimg_store_lanes(ins, vd, if t == 2 { Lane::Sint } else { Lane::Uint }, "0u")?;
                     let ctor = if t == 2 { "int4" } else { "uint4" };
                     self.line(&format!("if (exec_lo & 1u) {uobj}[uint{ncoord}({})] = {ctor}({});", c.join(", "), comp.join(", ")));
                     return Ok(());
                 }
-                let mut comp = vec![];
-                let mut n = 0u8;
-                for ch in 0..4 {
-                    if (ins.aux.mask >> ch) & 1 != 0 {
-                        let o = Opnd::Vgpr(vd + n);
-                        self.touch(&o);
-                        comp.push(f(&o)?);
-                        n += 1;
-                    } else {
-                        comp.push("0.0".into());
-                    }
-                }
+                let comp = self.mimg_store_lanes(ins, vd, Lane::Float, "0.0")?;
                 let addr = format!("{uobj}[uint{ncoord}({})]", c.join(", "));
                 let t = self.tmp;
                 self.tmp += 1;
@@ -5474,18 +5552,20 @@ impl<'a> Emitter<'a> {
                     None => "float4",
                 };
                 self.line(&format!("{ety} t{t} = {e};"));
-                let mut n = 0u8;
-                for ch in 0..4 {
-                    if (ins.aux.mask >> ch) & 1 != 0 {
-                        let e = match ety {
-                            "float4" => format!("asuint(t{t}.{})", XYZW[ch]),
-                            "int4" => format!("(uint)t{t}.{}", XYZW[ch]),
-                            _ => format!("t{t}.{}", XYZW[ch]),
-                        };
-                        self.wv(&Opnd::Vgpr(vd + n), &e)?;
-                        n += 1;
-                    }
-                }
+                let vals = (0..4)
+                    .filter(|ch| (ins.aux.mask >> ch) & 1 != 0)
+                    .map(|ch| match ety {
+                        "float4" => format!("asuint(t{t}.{})", XYZW[ch]),
+                        "int4" => format!("(uint)t{t}.{}", XYZW[ch]),
+                        _ => format!("t{t}.{}", XYZW[ch]),
+                    })
+                    .collect();
+                let lane = match ety {
+                    "float4" => Lane::Float,
+                    "int4" => Lane::Sint,
+                    _ => Lane::Uint,
+                };
+                self.mimg_write_lanes(ins, vd, vals, lane)?;
             }
             return Ok(());
         }
@@ -5532,15 +5612,8 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "float2 t{t} = float2(tex{tslot}.CalculateLevelOfDetail(samp{sslot}, {cv}), tex{tslot}.CalculateLevelOfDetailUnclamped(samp{sslot}, {cv}));"
             ));
-            let mut n = 0u8;
-            for ch in 0..4 {
-                if (ins.aux.mask >> ch) & 1 != 0 {
-                    let e = if ch < 2 { format!("asuint(t{t}.{})", XYZW[ch]) } else { "0u".to_string() };
-                    self.wv(&Opnd::Vgpr(vd + n), &e)?;
-                    n += 1;
-                }
-            }
-            return Ok(());
+            let vals = (0..4).filter(|ch| (ins.aux.mask >> ch) & 1 != 0).map(|ch| if ch < 2 { format!("asuint(t{t}.{})", XYZW[ch]) } else { "0u".to_string() }).collect();
+            return self.mimg_write_lanes(ins, vd, vals, Lane::Float);
         }
         let op = ins.op;
         let gather = (0x40..0x60).contains(&op);
@@ -5689,10 +5762,8 @@ impl<'a> Emitter<'a> {
                 None => format!("{gtex}.Gather{chan}({smp}, {cvec}{off})"),
             };
             self.line(&format!("float4 t{t} = {call};"));
-            for k in 0..4u8 {
-                self.wv(&Opnd::Vgpr(vd + k), &format!("asuint(t{t}.{})", XYZW[k as usize]))?;
-            }
-            return Ok(());
+            let vals = (0..4).map(|k| format!("asuint(t{t}.{})", XYZW[k])).collect();
+            return self.mimg_write_lanes(ins, vd, vals, Lane::Float);
         }
         // FXC (SM5) refuses implicit-derivative samples inside a loop it cannot unroll
         // (X3570/X3511). The console GPU computes those derivatives per quad regardless of
@@ -5728,14 +5799,8 @@ impl<'a> Emitter<'a> {
         if zref.is_some() {
             self.line(&format!("float t{t} = {call};"));
             // The compare result is replicated to every requested channel.
-            let mut n = 0u8;
-            for ch in 0..4 {
-                if (ins.aux.mask >> ch) & 1 != 0 {
-                    self.wv(&Opnd::Vgpr(vd + n), &format!("asuint(t{t})"))?;
-                    n += 1;
-                }
-            }
-            return Ok(());
+            let vals = (0..4).filter(|ch| (ins.aux.mask >> ch) & 1 != 0).map(|_| format!("asuint(t{t})")).collect();
+            return self.mimg_write_lanes(ins, vd, vals, Lane::Float);
         }
         if in_loop && matches!(modi, 0 | 1 | 5 | 6) && self.ex.stage == Stage::Pixel {
             let sw = match (nder, ncoord) {
@@ -5763,15 +5828,8 @@ impl<'a> Emitter<'a> {
         } else {
             self.line(&format!("float4 t{t} = {call};"));
         }
-        let mut n = 0u8;
-        for ch in 0..4 {
-            if (ins.aux.mask >> ch) & 1 != 0 {
-                let dst = Opnd::Vgpr(vd + n);
-                self.wv(&dst, &format!("asuint(t{t}.{})", XYZW[ch]))?;
-                n += 1;
-            }
-        }
-        Ok(())
+        let vals = (0..4).filter(|ch| (ins.aux.mask >> ch) & 1 != 0).map(|ch| format!("asuint(t{t}.{})", XYZW[ch])).collect();
+        self.mimg_write_lanes(ins, vd, vals, Lane::Float)
     }
 
     /// Statically known value of a VGPR at instruction `idx`: the most recent write in
@@ -5845,13 +5903,24 @@ impl<'a> Emitter<'a> {
         }
         if is_ps && target == 8 {
             // MRTZ: x = depth.
-            if en & 1 == 0 {
-                return Err("MRTZ export without depth (stencil/sample-mask only) unsupported".into());
+            let depth = self.ex.output_sig.iter().any(|e| matches!(e.sysval, 65 | 67 | 68));
+            let stencil = self.ex.output_sig.iter().position(|e| e.sysval == 69);
+            let coverage = self.ex.output_sig.iter().position(|e| e.sysval == 66);
+            if depth && en & 1 == 0 {
+                return Err("MRTZ export leaves depth unwritten although the output signature has SV_Depth".into());
             }
-            if !self.ex.output_sig.iter().any(|e| matches!(e.sysval, 65 | 67 | 68)) {
-                return Err("depth export without an SV_Depth output".into());
+            if !depth && stencil.is_none() && coverage.is_none() {
+                return Err("MRTZ export but the output signature has no SV_Depth, SV_StencilRef or SV_Coverage".into());
             }
-            self.line(&format!("if (exec_lo & 1u) o.od = {};", f(&ins.src[0])?));
+            if depth {
+                self.line(&format!("if (exec_lo & 1u) o.od = {};", f(&ins.src[0])?));
+            }
+            if let Some(si) = stencil.filter(|_| en & 2 != 0) {
+                self.line(&format!("if (exec_lo & 1u) o.o{si} = {};", r(&ins.src[1])?));
+            }
+            if let Some(ci) = coverage.filter(|_| en & 4 != 0) {
+                self.line(&format!("if (exec_lo & 1u) o.o{ci} = {};", r(&ins.src[2])?));
+            }
             return Ok(());
         }
         if !is_ps && (32..64).contains(&target) && (target - 32) as usize >= self.out_params.len() {
@@ -5878,9 +5947,40 @@ impl<'a> Emitter<'a> {
                 .ok_or_else(|| format!("MRT export {target} has no SV_Target output element"))?;
             assigns.push((ei, "xyzw"[..sig_type(&osig[ei]).1].to_string()));
         } else if (12..=15).contains(&target) {
-            if target != 12 {
-                return Err(format!("position export {target} unsupported"));
-            }
+            let misc: Vec<(usize, &str)> = osig
+                .iter()
+                .enumerate()
+                .filter_map(|(ei, e)| match e.sysval {
+                    4 => Some((ei, "z")),
+                    5 => Some((ei, "w")),
+                    _ => None,
+                })
+                .collect();
+            if target == 13 && !misc.is_empty() {
+                for (ei, c) in misc {
+                    if self.durango.is_none() && osig.iter().any(|e| e.sysval == 5) {
+                        return Err("position export 13 (misc vector) writes SV_ViewportArrayIndex, which RDNA2 packs into layer bits 19:16; not lowered".into());
+                    }
+                    if (en >> if c == "z" { 2 } else { 3 }) & 1 == 0 {
+                        return Err(format!("position export 13 (misc vector) leaves the {c} lane of {} disabled", osig[ei].name));
+                    }
+                    assigns.push((ei, c.to_string()));
+                }
+            } else if target != 12 {
+                let mut regs: Vec<u32> = osig.iter().filter(|e| matches!(e.sysval, 2 | 3)).map(|e| e.register).collect();
+                regs.sort();
+                regs.dedup();
+                let first = if misc.is_empty() { 13 } else { 14 };
+                let Some(&reg) = regs.get(target.checked_sub(first).unwrap_or(u32::MAX) as usize) else {
+                    return Err(format!("position export {target} has no SV_ClipDistance/SV_CullDistance output register"));
+                };
+                for (ei, e) in osig.iter().enumerate() {
+                    if matches!(e.sysval, 2 | 3) && e.register == reg {
+                        let sw: String = (0..4).filter(|c| (e.mask >> c) & 1 != 0).map(|c| XYZW[c]).collect();
+                        assigns.push((ei, sw));
+                    }
+                }
+            } else {
             match osig.iter().position(|e| e.sysval == 1) {
                 Some(ei) => assigns.push((ei, "xyzw".to_string())),
                 None => {
@@ -5890,6 +5990,7 @@ impl<'a> Emitter<'a> {
                     self.line("// (position export with no SV_Position output element: ignored)");
                     return Ok(());
                 }
+            }
             }
         } else if (32..64).contains(&target) {
             let reg = self.out_params[(target - 32) as usize];
@@ -5930,9 +6031,6 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    /// Declarations of every register variable the body uses. Shaders with
-    /// register-relative moves keep their VGPRs in one array (`tb_v`), with each `vN` name
-    /// defined as an element of it, so `VGPR[n + M0]` is a plain dynamic index.
     fn reg_decls(&self) -> String {
         let is_v = |r: &str| r.len() > 1 && r.starts_with('v') && r[1..].bytes().all(|b| b.is_ascii_digit());
         let mut out = String::new();
@@ -5942,15 +6040,14 @@ impl<'a> Emitter<'a> {
             out.push_str(&format!("    uint {};", scalars.join(", ")));
         }
         if self.vreg_array {
-            out.push_str("\n    uint tb_v[256] = (uint[256])0;");
-            for n in 0..256 {
-                out.push_str(&format!("\n#define v{n} tb_v[{n}]"));
-            }
+            let all: Vec<String> = (0..256).map(|n| format!("v{n} = 0u")).collect();
+            out.push_str(&format!("\n    uint {};", all.join(", ")));
         }
         out
     }
 
     fn finish(&mut self, is_ps: bool) -> Result<String, String> {
+        let dg_init = self.dg_sgpr_init();
         let ex = self.ex;
         let mut h = String::new();
         let _ = writeln!(h, "// Generated by tombox-xshader from RDNA2 microcode ({:?}, {} instrs).", ex.stage, self.insns.len());
@@ -6124,16 +6221,14 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
             let _ = writeln!(h, "{}", self.reg_decls());
             let _ = writeln!(h, "    v0 = gtid.x; v1 = gtid.y; v2 = gtid.z;");
             let _ = writeln!(h, "    s{} = gid.x; s{} = gid.y; s{} = gid.z;", g, g + 1, g + 2);
+            h.push_str(&dg_init);
             h.push_str(&self.body);
             h.push_str("}
 ");
             return Ok(h);
         }
         let _ = writeln!(h, "struct SIn {{");
-        // HLSL requires system-generated inputs (SV_IsFrontFace, SV_SampleIndex,
-        // SV_PrimitiveID, ...) to follow all ordinary parameters, so emit them last.
-        // Field names stay tied to the signature element index.
-        let sysgen = |e: &SigElement| is_ps && !matches!(e.sysval, 0 | 1);
+        let sysgen = |e: &SigElement| is_ps && !matches!(e.sysval, 0..=5);
         let pos_field = match ex.input_sig.iter().position(|e| e.sysval == 1) {
             Some(ei) => format!("i.i{ei}"),
             None => "i.tb_pos".to_string(),
@@ -6279,6 +6374,7 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
                 }
             }
         }
+        init.push_str(&dg_init);
         let (init, body) = centroid::lower(ex, &pos_field, &init, &self.body);
         h.push_str(&init);
         h.push_str(&body);

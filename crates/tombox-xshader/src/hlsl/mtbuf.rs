@@ -110,10 +110,11 @@ fn pack(v: &str, bits: u32, num: Num) -> Result<String, String> {
     let mx = mask(bits);
     Ok(match num {
         Num::Unorm => format!("((uint)round(saturate(asfloat({v})) * {mx}.0))"),
-        Num::Snorm => format!(
-            "(((({v}) & 0x7fffffffu) > 0x7f800000u) ? 0u : (asuint((int)round(clamp(asfloat({v}), -1.0, 1.0) * {}.0)) & {mx:#x}u))",
-            mask(bits - 1)
-        ),
+        Num::Snorm => {
+            let a = format!("(abs(clamp(asfloat({v}), -1.0, 1.0)) * {}.0)", mask(bits - 1));
+            let q = format!("((int)(floor({a}) + ((({a}) - floor({a})) >= 0.5 ? 1.0 : 0.0)))");
+            format!("(((({v}) & 0x7fffffffu) > 0x7f800000u) ? 0u : (asuint((({v}) >> 31) != 0u ? -{q} : {q}) & {mx:#x}u))")
+        }
         Num::Uint if bits == 32 => v.to_string(),
         Num::Uint => format!("min({v}, {mx:#x}u)"),
         Num::Sint if bits == 32 => v.to_string(),
@@ -148,10 +149,10 @@ fn pack_d16(h: &str, bits: u32, num: Num) -> Result<String, String> {
 }
 
 impl<'a> Emitter<'a> {
-    pub(super) fn mtbuf_res(&mut self, ins: &Insn, slot: u32, table: u8) -> Result<Res, String> {
+    pub(super) fn mtbuf_res(&mut self, ins: &Insn, slot: u32, table: u8, off: u32) -> Result<Res, String> {
         let fmt = ufmt(ins.aux.imm2 as u32).ok_or_else(|| format!("mtbuf at {:#x}: invalid buffer format {}", ins.offset, ins.aux.imm2))?;
         let writes = ins.mnemonic.starts_with("tbuffer_store") || self.uav_force.contains(&slot);
-        let kind = self.table_kind_for(table, writes);
+        let kind = self.kind_at(table, off, writes)?;
         let is_uav = match kind {
             Some(0) => false,
             Some(1) => true,
@@ -270,12 +271,7 @@ impl<'a> Emitter<'a> {
             return Ok(());
         }
         let w = n.min(nc);
-        let (lo_off, lo_bits) = fmt.fields[w as usize - 1];
-        let end_bits = lo_off + lo_bits;
-        if w < nc && (end_bits % 8 != 0 || fmt.fields[..w as usize].iter().any(|&(o, b)| o % 8 != 0 || b % 8 != 0)) {
-            return Err(format!("{} on a format with sub-byte packed components writes part of a byte", ins.mnemonic));
-        }
-        let len = if w < nc { end_bits / 8 } else { fmt.bytes };
+        let len = fmt.bytes;
         let mut words = vec![String::new(); ndw as usize];
         for k in 0..w {
             let (off, bits) = fmt.fields[k as usize];

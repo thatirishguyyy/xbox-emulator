@@ -18,13 +18,7 @@ const NETWORK_PROFILE: [u8; 16] = [0x72, 0x59, 0x79, 0xed, 0xe8, 0x60, 0x15, 0x4
 const AGGREGATE: [u8; 16] = [0x13, 0xcc, 0x3f, 0x70, 0x6f, 0xb6, 0x68, 0x58, 0xdd, 0xd9, 0xe2, 0xdb, 0x7f, 0x38, 0x1f, 0xfb];
 
 fn built() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let mut dirs: Vec<PathBuf> = std::env::var_os("CARGO_TARGET_DIR").map(|d| vec![PathBuf::from(d).join("debug")]).unwrap_or_default();
-    dirs.extend(exe.ancestors().skip(1).flat_map(|a| [a.to_path_buf(), a.join("debug")]));
-    dirs.into_iter()
-        .map(|d| d.join("netprofmsvc_c.dll"))
-        .find(|p| p.is_file())
-        .expect("netprofmsvc_c.dll not built; run cargo build -p netprofmsvc_c before cargo test")
+    xone_exports::build_cdylib(env!("CARGO"), env!("CARGO_MANIFEST_DIR"), "netprofmsvc_c", "netprofmsvc_c.dll")
 }
 
 fn rows() -> Vec<xone_exports::Export> {

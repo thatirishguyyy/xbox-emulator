@@ -3,7 +3,7 @@ use crate::shader_cache::Fma;
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-const PROBE_VERSION: u32 = 2;
+const PROBE_VERSION: u32 = 3;
 const OUTS: usize = 5;
 const GROUP: u32 = 256;
 const CASES: usize = 1 << 20;
@@ -20,17 +20,90 @@ pub struct Probe {
     pub cached: bool,
 }
 
-fn helper_lines() -> Option<(&'static str, &'static str)> {
+fn helper_lines() -> Option<(&'static str, &'static str, &'static str)> {
     let h = crate::hlsl::CUBE_HELPERS;
     let s = h.find("#ifdef TB_FAST_FMA\n")? + "#ifdef TB_FAST_FMA\n".len();
     let rest = &h[s..];
     let (fast, rest) = rest.split_once('\n')?;
+    let rest = rest.strip_prefix("#elif defined(TB_HYBRID_FMA)\n")?;
+    let (hybrid, rest) = rest.split_once('\n')?;
     let rest = rest.strip_prefix("#else\n")?;
     let (exact, rest) = rest.split_once('\n')?;
-    if !rest.starts_with("#endif") || !fast.starts_with("float tb_fma(") || !exact.starts_with("float tb_fma(") {
+    if !rest.starts_with("#endif") || ![fast, hybrid, exact].iter().all(|l| l.starts_with("float tb_fma(")) {
+        return None;
+    }
+    Some((fast, hybrid, exact))
+}
+
+fn f2h_lines() -> Option<(&'static str, &'static str)> {
+    let h = crate::hlsl::CUBE_HELPERS;
+    let s = h.find("#ifdef TB_FAST_F2H\n")? + "#ifdef TB_FAST_F2H\n".len();
+    let rest = &h[s..];
+    let (fast, rest) = rest.split_once('\n')?;
+    let rest = rest.strip_prefix("#else\n")?;
+    let (exact, rest) = rest.split_once('\n')?;
+    if !rest.starts_with("#endif") || !fast.starts_with("uint tb_f2h(") || !exact.starts_with("uint tb_f2h(") {
         return None;
     }
     Some((fast, exact))
+}
+
+const F2H_PER_THREAD: u32 = 4096;
+
+fn f2h_shader(fast: &str, exact: &str) -> String {
+    format!(
+        "RWByteAddressBuffer io : register(u0);\n{}\n{}\n[RootSignature(\"UAV(u0)\")]\n[numthreads({GROUP}, 1, 1)]\nvoid main(uint3 g : SV_DispatchThreadID) {{ uint base = g.x * {F2H_PER_THREAD}u; uint bad = 0u; uint first = 0xffffffffu; for (uint k = 0u; k < {F2H_PER_THREAD}u; k++) {{ uint x = base + k; if (tb_f2h_f(asfloat(x)) != tb_f2h_x(asfloat(x))) {{ bad++; first = min(first, x); }} }} uint o; if (bad != 0u) {{ io.InterlockedAdd(0, bad, o); io.InterlockedMin(4, first, o); }} io.InterlockedAdd(8, 1u, o); }}\n",
+        fast.replacen("uint tb_f2h(", "uint tb_f2h_f(", 1),
+        exact.replacen("uint tb_f2h(", "uint tb_f2h_x(", 1)
+    )
+}
+
+unsafe fn dispatch_f2h(g: &mut Gpu, code: &[u8]) -> Result<(u32, u32, u32), String> {
+    let mut rs: *mut c_void = std::ptr::null_mut();
+    let hr = vcall!(g.device, 16, fn(u32, *const u8, usize, *const Guid, *mut *mut c_void) -> i32, 0, code.as_ptr(), code.len(), &d3d::IID_ROOTSIG, &mut rs);
+    if hr < 0 {
+        return Err(format!("CreateRootSignature {:#x}", hr as u32));
+    }
+    let mut d = [0u8; 56];
+    d[0..8].copy_from_slice(&(rs as u64).to_le_bytes());
+    d[8..16].copy_from_slice(&(code.as_ptr() as u64).to_le_bytes());
+    d[16..24].copy_from_slice(&(code.len() as u64).to_le_bytes());
+    let mut pso: *mut c_void = std::ptr::null_mut();
+    let hr = vcall!(g.device, 11, fn(*const u8, *const Guid, *mut *mut c_void) -> i32, d.as_ptr(), &d3d::IID_PSO, &mut pso);
+    if hr < 0 {
+        d3d::release(rs);
+        return Err(format!("CreateComputePipelineState {:#x}", hr as u32));
+    }
+    let buf = g.buffer(12, 1, d3d::COPY_DEST, true)?;
+    let up = g.buffer(12, 2, d3d::GENERIC_READ, false)?;
+    let rb = g.buffer(12, 3, d3d::COPY_DEST, false)?;
+    let mut init = 0u32.to_le_bytes().to_vec();
+    init.extend(u32::MAX.to_le_bytes());
+    init.extend(0u32.to_le_bytes());
+    Gpu::map_write(up, &init);
+    g.begin();
+    let l = g.list;
+    vcall!(l, 15, fn(*mut c_void, u64, *mut c_void, u64, u64) -> (), buf, 0, up, 0, 12);
+    g.barrier(buf, d3d::COPY_DEST, 8);
+    vcall!(l, 29, fn(*mut c_void) -> (), rs);
+    vcall!(l, 25, fn(*mut c_void) -> (), pso);
+    vcall!(l, 41, fn(u32, u64) -> (), 0, Gpu::gpu_va(buf));
+    vcall!(l, 14, fn(u32, u32, u32) -> (), f2h_groups(), 1, 1);
+    g.barrier(buf, 8, d3d::COPY_SOURCE);
+    vcall!(l, 15, fn(*mut c_void, u64, *mut c_void, u64, u64) -> (), rb, 0, buf, 0, 12);
+    let sub = g.submit();
+    let out = if sub.is_ok() { Gpu::map_read(rb, 12) } else { None };
+    for o in [pso, rs, buf, up, rb] {
+        d3d::release(o);
+    }
+    sub?;
+    let out = out.ok_or("map readback")?;
+    let w = |i: usize| u32::from_le_bytes(out[i..i + 4].try_into().unwrap());
+    Ok((w(0), w(4), w(8)))
+}
+
+fn f2h_groups() -> u32 {
+    ((1u64 << 32) / (F2H_PER_THREAD as u64 * GROUP as u64)) as u32
 }
 
 unsafe fn adapter_id() -> String {
@@ -190,22 +263,41 @@ unsafe fn dispatch(g: &mut Gpu, code: &[u8], cs: &[[u32; 3]]) -> Result<Vec<[u32
     Ok(out[obase as usize..].chunks(8).map(|c| [u32::from_le_bytes(c[0..4].try_into().unwrap()), u32::from_le_bytes(c[4..8].try_into().unwrap())]).collect())
 }
 
-fn run_probe(fast: &str, exact: &str) -> Result<(Fma, String), String> {
-    let src = shader(fast, exact);
-    let mut g = unsafe { Gpu::new(false) }?;
-    g.open = false;
-    let cs = cases(CASES, 0x9e37_79b9_7f4a_7c15 ^ PROBE_VERSION as u64);
-    let mut res = [false; 2];
-    let mut detail = String::new();
-    for (i, mode) in ["preserve", "any"].iter().enumerate() {
-        let code = crate::dxc::compile_denorm(&src, "cs_6_2", mode, &[])?;
-        let out = unsafe { dispatch(&mut g, &code, &cs) }?;
+fn compare_fma(g: &mut Gpu, src: &str, modes: &[&str], cs: &[[u32; 3]], detail: &mut String, tag: &str) -> Result<Vec<bool>, String> {
+    let mut res = Vec::new();
+    for mode in modes {
+        let code = crate::dxc::compile_denorm(src, "cs_6_2", mode, &[])?;
+        let out = unsafe { dispatch(g, &code, cs) }?;
         let bad: Vec<usize> = out.iter().enumerate().filter(|(_, o)| o[0] != o[1]).map(|(k, _)| k / OUTS).collect();
-        res[i] = bad.is_empty() && out.len() == cs.len() * OUTS;
-        detail.push_str(&format!(" {mode}: {} of {} results differ", bad.len(), out.len()));
+        res.push(bad.is_empty() && out.len() == cs.len() * OUTS);
+        detail.push_str(&format!(" {tag}{mode}: {} of {} results differ", bad.len(), out.len()));
         if let Some(&k) = bad.first() {
             let j = out.iter().position(|o| o[0] != o[1]).unwrap_or(0);
             detail.push_str(&format!(" (first a={:08x} b={:08x} c={:08x} form {} fast={:08x} exact={:08x})", cs[k][0], cs[k][1], cs[k][2], j % OUTS, out[j][0], out[j][1]));
+        }
+    }
+    Ok(res)
+}
+
+fn run_probe(fast: &str, hybrid: &str, exact: &str, f2h: Option<(&str, &str)>) -> Result<(Fma, String), String> {
+    let mut g = unsafe { Gpu::new(false) }?;
+    g.open = false;
+    let cs = cases(CASES, 0x9e37_79b9_7f4a_7c15 ^ PROBE_VERSION as u64);
+    let mut detail = String::new();
+    let res = compare_fma(&mut g, &shader(fast, exact), &["preserve", "any"], &cs, &mut detail, "")?;
+    let hyb = compare_fma(&mut g, &shader(hybrid, exact), &["any"], &cs, &mut detail, "hybrid ")?;
+    let mut f2h_ok = f2h.is_some();
+    if let Some((ff, fx)) = f2h {
+        let src = f2h_shader(ff, fx);
+        for mode in ["preserve", "any"] {
+            let code = crate::dxc::compile_denorm(&src, "cs_6_2", mode, &["-enable-16bit-types"])?;
+            let (bad, first, ran) = unsafe { dispatch_f2h(&mut g, &code) }?;
+            let all = ran == f2h_groups() * GROUP;
+            f2h_ok &= bad == 0 && all;
+            detail.push_str(&format!(" f2h {mode}: {bad} of 4294967296 inputs differ{}", if all { "" } else { " (not all threads ran)" }));
+            if bad != 0 {
+                detail.push_str(&format!(" (first {first:08x})"));
+            }
         }
     }
     unsafe {
@@ -213,7 +305,16 @@ fn run_probe(fast: &str, exact: &str) -> Result<(Fma, String), String> {
             d3d::release(o);
         }
     }
-    Ok((Fma { preserve: res[0], any: res[1] }, detail.trim().to_string()))
+    Ok((Fma { preserve: res[0], any: res[1], hybrid: hyb[0], f2h: f2h_ok }, detail.trim().to_string()))
+}
+
+pub fn parse_flags(r: &str) -> Fma {
+    let on = |k: &str| r.split_whitespace().any(|w| w == format!("{k}=1"));
+    Fma { preserve: on("preserve"), any: on("any"), hybrid: on("hybrid"), f2h: on("f2h") }
+}
+
+pub fn format_flags(f: Fma) -> String {
+    format!("preserve={} any={} hybrid={} f2h={}", f.preserve as u8, f.any as u8, f.hybrid as u8, f.f2h as u8)
 }
 
 pub fn probe() -> &'static Probe {
@@ -222,15 +323,16 @@ pub fn probe() -> &'static Probe {
         let adapter = unsafe { adapter_id() };
         match std::env::var("TOMBOX_FAST_FMA").ok().as_deref() {
             Some("0") => return Probe { fma: Fma::default(), adapter, detail: "TOMBOX_FAST_FMA=0: exact f64 FMA path forced".into(), cached: false },
-            Some("force") => return Probe { fma: Fma { preserve: true, any: true }, adapter, detail: "TOMBOX_FAST_FMA=force: hardware mad used WITHOUT verification".into(), cached: false },
+            Some("force") => return Probe { fma: Fma { preserve: true, any: true, hybrid: true, f2h: true }, adapter, detail: "TOMBOX_FAST_FMA=force: hardware mad used WITHOUT verification".into(), cached: false },
             _ => {}
         }
-        let Some((fast, exact)) = helper_lines() else {
+        let Some((fast, hybrid, exact)) = helper_lines() else {
             return Probe { fma: Fma::default(), adapter, detail: "tb_fma helper block not found; exact path kept".into(), cached: false };
         };
         let id = format!("v{PROBE_VERSION} {adapter} {} {:016x}", crate::dxc::identity(), {
             let mut h = 0xcbf2_9ce4_8422_2325u64;
-            for b in fast.bytes().chain(exact.bytes()) {
+            let f2h = f2h_lines().map_or(String::new(), |(a, b)| format!("{a}{b}"));
+            for b in fast.bytes().chain(hybrid.bytes()).chain(exact.bytes()).chain(f2h.bytes()) {
                 h ^= b as u64;
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             }
@@ -241,14 +343,14 @@ pub fn probe() -> &'static Probe {
             let mut it = t.lines();
             if it.next() == Some(id.as_str()) {
                 if let Some(r) = it.next() {
-                    let fma = Fma { preserve: r.contains("preserve=1"), any: r.contains("any=1") };
+                    let fma = parse_flags(r);
                     return Probe { fma, adapter, detail: it.next().unwrap_or("").to_string(), cached: true };
                 }
             }
         }
-        match std::panic::catch_unwind(|| run_probe(fast, exact)) {
+        match std::panic::catch_unwind(|| run_probe(fast, hybrid, exact, f2h_lines())) {
             Ok(Ok((fma, detail))) => {
-                let _ = std::fs::write(&file, format!("{id}\npreserve={} any={}\n{detail}\n", fma.preserve as u8, fma.any as u8));
+                let _ = std::fs::write(&file, format!("{id}\n{}\n{detail}\n", format_flags(fma)));
                 Probe { fma, adapter, detail, cached: false }
             }
             Ok(Err(e)) => Probe { fma: Fma::default(), adapter, detail: format!("probe failed ({e}); exact path kept"), cached: false },
@@ -263,15 +365,36 @@ mod tests {
 
     #[test]
     fn helper_block_is_found() {
-        let (f, x) = helper_lines().expect("tb_fma block");
-        assert!(f.contains("mad("));
+        let (f, h, x) = helper_lines().expect("tb_fma block");
+        assert!(f.contains("mad(") && !f.contains("double"));
+        assert!(h.contains("mad(") && h.contains("double"));
         assert!(x.contains("double"));
+        let (ff, fx) = f2h_lines().expect("tb_f2h block");
+        assert!(ff.contains("(float16_t)x"));
+        assert!(!fx.contains("f32tof16("));
+        assert!(f2h_shader(ff, fx).contains("tb_f2h_f(") && f2h_shader(ff, fx).contains("tb_f2h_x("));
+    }
+
+    #[test]
+    fn cached_flags_round_trip() {
+        for bits in 0..16u8 {
+            let f = Fma { preserve: bits & 1 != 0, any: bits & 2 != 0, hybrid: bits & 4 != 0, f2h: bits & 8 != 0 };
+            assert_eq!(parse_flags(&format_flags(f)), f);
+        }
+        assert_eq!(parse_flags("preserve=1 any=0"), Fma { preserve: true, ..Fma::default() });
+    }
+
+    #[test]
+    fn hybrid_line_keeps_the_exact_body_as_fallback() {
+        let (_, h, x) = helper_lines().unwrap();
+        let body = x.split_once("{ ").unwrap().1;
+        assert!(h.ends_with(body));
     }
 
     #[test]
     #[ignore = "needs a D3D12 GPU"]
     fn hw_bypass_digest_container_runs() {
-        let (f, x) = helper_lines().unwrap();
+        let (f, _, x) = helper_lines().unwrap();
         let src = shader(f, x);
         let t0 = std::time::Instant::now();
         let signed = crate::dxc::compile_denorm(&src, "cs_6_2", "preserve", &[]).unwrap();
@@ -294,8 +417,8 @@ mod tests {
     #[test]
     #[ignore = "needs a D3D12 GPU"]
     fn hw_fast_fma_matches_exact_path() {
-        let (f, x) = helper_lines().unwrap();
-        let (fma, detail) = run_probe(f, x).expect("probe");
+        let (f, h, x) = helper_lines().unwrap();
+        let (fma, detail) = run_probe(f, h, x, f2h_lines()).expect("probe");
         println!("{} | {:?} | {detail}", unsafe { adapter_id() }, fma);
     }
 }

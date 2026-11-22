@@ -191,7 +191,7 @@ impl Enumerator {
         loop {
             attempt += 1;
             if self.handle == INVALID_HANDLE_VALUE {
-                let h = match host_path(search) {
+                let h = match crate::paths::host_search_path(search) {
                     Ok(p) => unsafe { FindFirstFileExW(p.wide.as_ptr(), 1, data, 0, core::ptr::null_mut(), FIND_FIRST_EX_LARGE_FETCH) },
                     Err(e) => {
                         unsafe { file::SetLastError(e) };
@@ -475,4 +475,30 @@ pub unsafe extern "system" fn find_files_handler(session: usize, request: *mut c
         find_files(&full, req.include, req.exclude, req.recursion, &mut cb)
     };
     serialize(&MsgResponse { result: hr }, response)
+}
+
+fn upper_unit(u: u16) -> u16 {
+    match char::from_u32(u as u32) {
+        Some(c) => {
+            let mut it = c.to_uppercase();
+            match (it.next(), it.next()) {
+                (Some(x), None) if (x as u32) < 0x10000 => x as u16,
+                _ => u,
+            }
+        }
+        None => u,
+    }
+}
+
+pub fn relative_file_name(root: &str, path: &str) -> Result<String, HRESULT> {
+    let r: Vec<u16> = root.encode_utf16().collect();
+    let p: Vec<u16> = path.encode_utf16().collect();
+    if p.len() < r.len() || r.iter().zip(p.iter()).any(|(a, b)| upper_unit(*a) != upper_unit(*b)) {
+        return Err(E_UNEXPECTED);
+    }
+    let mut i = r.len();
+    while i < p.len() && p[i] == b'\\' as u16 {
+        i += 1;
+    }
+    Ok(String::from_utf16_lossy(&p[i..]))
 }

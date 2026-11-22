@@ -310,9 +310,28 @@ pub unsafe fn peek(out: *mut Msg, hwnd: *mut c_void, lo: u32, hi: u32, flags: u3
             }
             continue;
         }
+        if crate::test_run() && !taken_over() && matches!(m.message, 0x0100 | 0x0104 | 0x0201 | 0x0204 | 0x0207 | 0x020B) {
+            take_over(m.message);
+        }
+        if host_kbm_message(m.message) && host_kbm_hidden() {
+            if flags & PM_REMOVE == 0 {
+                let mut t = Msg::default();
+                PeekMessageW(&mut t, m.hwnd as *mut c_void, m.message, m.message, PM_REMOVE);
+            }
+            continue;
+        }
         *out = m;
         return Ok(true);
     }
+}
+
+pub fn host_kbm_message(msg: u32) -> bool {
+    msg == 0x00FF || (0x0100..=0x0109).contains(&msg) || (0x0200..=0x020E).contains(&msg) || (0x02A0..=0x02A3).contains(&msg)
+}
+
+pub fn host_kbm_hidden() -> bool {
+    static H: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *H.get_or_init(|| matches!(std::env::var("TOMBOX_HOST_KBM").ok().as_deref().map(str::trim), Some("0") | Some("off") | Some("false"))) && !taken_over()
 }
 
 pub unsafe fn get(out: *mut Msg, hwnd: *mut c_void, lo: u32, hi: u32) -> Result<bool, u32> {
@@ -348,4 +367,47 @@ pub fn queued(tid: u32) -> Vec<Msg> {
 
 pub fn overflow_len(tid: u32) -> usize {
     lock().get(&tid).map_or(0, |q| q.overflow.len())
+}
+
+static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn taken_over() -> bool {
+    if TAKEN.load(std::sync::atomic::Ordering::Acquire) {
+        return true;
+    }
+    if !crate::test_run() {
+        return false;
+    }
+    if std::env::var("TOMBOX_TAKEN").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        if !TAKEN.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            crate::restore_test_windows();
+        }
+        return true;
+    }
+    false
+}
+
+pub fn takeover_record(pid: u32, title: &str, at: &str) -> String {
+    format!("script_pid=0 game_pid={pid} title={title} started={at} takeover=1")
+}
+
+fn take_over(msg: u32) {
+    if TAKEN.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let reason = format!("window message {msg:#x} on the test window");
+    if !std::env::var("TOMBOX_TAKEN").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        std::env::set_var("TOMBOX_TAKEN", &reason);
+        let pid = std::process::id();
+        let title = std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned())).unwrap_or_default();
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string();
+        for (var, body) in [("TOMBOX_USER_PLAYING_FILE", takeover_record(pid, &title, &at)), ("TOMBOX_TAKEOVER_FILE", format!("pid={pid} reason={reason} at={at}"))] {
+            if let Ok(path) = std::env::var(var) {
+                if !path.trim().is_empty() {
+                    let _ = std::fs::write(path.trim(), body);
+                }
+            }
+        }
+    }
+    crate::restore_test_windows();
 }

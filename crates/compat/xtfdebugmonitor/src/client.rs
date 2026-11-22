@@ -1,6 +1,7 @@
 use crate::chk::chk;
 use crate::server::{OP_DETACH_PROCESS, OP_MONITOR_PROCESS};
 use crate::win::{CloseHandle, CreateEventW, CreateThread, Sleep, WaitForSingleObject, E_POINTER, INVALID_HANDLE_VALUE};
+use crate::profile::Profile;
 use crate::DEBUG_MONITOR_EXTENSION_ID;
 use core::ffi::c_void;
 use core::ptr::null_mut;
@@ -233,14 +234,14 @@ unsafe fn free_bstr(b: BSTR) {
     }
 }
 
-pub unsafe fn open_session_impl(conn: *const u16, override_port: u32, ext: *const GUID, iid: *const GUID, out: *mut Obj) -> HRESULT {
+pub unsafe fn open_session_impl(p: &Profile, conn: *const u16, override_port: u32, ext: *const GUID, iid: *const GUID, out: *mut Obj) -> HRESULT {
     let mut last = GetTickCount64();
     let mut ip: BSTR = null_mut();
     let mut key: BSTR = null_mut();
     let mut explicit = 0u32;
     let mut hr = split_console_address(conn, override_port, &mut ip, &mut key, &mut explicit);
     if hr < 0 {
-        log_api(b"SplitConsoleAddress( connectionString, port, &consoleIpAddress, &sessionKey, &explicitPort)\0", hr, API_CPP, 0xb2);
+        log_api(b"SplitConsoleAddress( connectionString, port, &consoleIpAddress, &sessionKey, &explicitPort)\0", hr, API_CPP, p.split_line);
         free_bstr(key);
         free_bstr(ip);
         return hr;
@@ -258,7 +259,7 @@ pub unsafe fn open_session_impl(conn: *const u16, override_port: u32, ext: *cons
     let limit = DEFAULT_OPEN_SESSION_TIMEOUT_MS;
     loop {
         hr = xbtp_open_session2(ip, override_port, &opts, ext, iid, out);
-        if hr != E_COULD_NOT_CONNECT {
+        if hr != E_COULD_NOT_CONNECT || !p.open_retry {
             break;
         }
         let mut now = GetTickCount64();
@@ -279,7 +280,7 @@ pub unsafe fn open_session_impl(conn: *const u16, override_port: u32, ext: *cons
         }
     }
     if hr < 0 {
-        log_api(b"hr\0", hr, API_CPP, 0x105);
+        log_api(p.open_expr, hr, API_CPP, p.open_line);
     }
     free_bstr(key);
     free_bstr(ip);
@@ -287,7 +288,7 @@ pub unsafe fn open_session_impl(conn: *const u16, override_port: u32, ext: *cons
 }
 
 pub unsafe fn open_vm_session(conn: *const u16, port: u32, out: *mut Obj) -> HRESULT {
-    let hr = open_session_impl(conn, port, &DEBUG_MONITOR_EXTENSION_ID, &IID_XBTP_CLIENT_SESSION, out);
+    let hr = open_session_impl(crate::profile::current(), conn, port, &DEBUG_MONITOR_EXTENSION_ID, &IID_XBTP_CLIENT_SESSION, out);
     if hr < 0 {
         log_api(b"XtfOpenSessionImpl( connectionString, overridePort, true, nullptr, extensionId, iid, ppvObject, &kDefaultOpenSessionTimeoutMS)\0", hr, API_CPP, 0x11f);
         return hr;
@@ -704,6 +705,7 @@ unsafe extern "system" fn client_stop(this: *mut DebugMonitorClient, process_id:
 #[no_mangle]
 pub unsafe extern "system" fn XtfCreateDebugMonitorClient(address: *const u16, riid: *const GUID, ppv: *mut Obj) -> HRESULT {
     const F: &str = "XtfCreateDebugMonitorClient";
+    crate::imports::bind();
     if ppv.is_null() {
         return E_POINTER;
     }

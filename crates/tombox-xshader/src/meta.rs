@@ -189,6 +189,23 @@ pub struct RootSig {
     pub flags: u32,
     pub params: Vec<RootParam>,
     pub num_static_samplers: u32,
+    pub static_samplers: Vec<StaticSampler>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaticSampler {
+    pub filter: u32,
+    pub address_v: u32,
+    pub address_w: u32,
+    pub max_anisotropy: u32,
+    pub comparison_func: u32,
+    pub border_color: u32,
+    pub min_lod_bits: u32,
+    pub max_lod_bits: u32,
+    pub address_u: u32,
+    pub register: u32,
+    pub space: u32,
+    pub visibility: u32,
 }
 
 /// Parse an RTS0 (serialized root signature) chunk body.
@@ -243,5 +260,31 @@ pub fn parse_rts0(body: &[u8]) -> Result<RootSig, String> {
         };
         params.push(RootParam { visibility, kind });
     }
-    Ok(RootSig { version, flags, params, num_static_samplers })
+    let mut static_samplers = Vec::new();
+    if num_static_samplers <= 64 {
+        if let Ok(so) = u32_at(body, 16) {
+            let stride = if version >= 3 { 56 } else { 52 };
+            for i in 0..num_static_samplers as usize {
+                let q = so as usize + i * stride;
+                if let (Ok(address_u), Ok(register), Ok(space), Ok(visibility)) = (u32_at(body, q + 4), u32_at(body, q + 40), u32_at(body, q + 44), u32_at(body, q + 48)) {
+                    let at = |o: usize| u32_at(body, q + o).unwrap_or(0);
+                    static_samplers.push(StaticSampler {
+                        filter: at(0),
+                        address_v: at(8),
+                        address_w: at(12),
+                        max_anisotropy: at(20),
+                        comparison_func: at(24),
+                        border_color: at(28),
+                        min_lod_bits: at(32),
+                        max_lod_bits: at(36),
+                        address_u,
+                        register,
+                        space,
+                        visibility,
+                    });
+                }
+            }
+        }
+    }
+    Ok(RootSig { version, flags, params, num_static_samplers, static_samplers })
 }

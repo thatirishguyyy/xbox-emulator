@@ -116,31 +116,7 @@ pub fn find_for_transfer(search: &str, include: u32, exclude: u32, recursion: u3
     TransferList { hr, root: root.unwrap_or_default(), files }
 }
 
-fn upper_unit(u: u16) -> u16 {
-    match char::from_u32(u as u32) {
-        Some(c) => {
-            let mut it = c.to_uppercase();
-            match (it.next(), it.next()) {
-                (Some(x), None) if (x as u32) < 0x10000 => x as u16,
-                _ => u,
-            }
-        }
-        None => u,
-    }
-}
-
-pub fn relative_file_name(root: &str, path: &str) -> Result<String, HRESULT> {
-    let r: Vec<u16> = root.encode_utf16().collect();
-    let p: Vec<u16> = path.encode_utf16().collect();
-    if p.len() < r.len() || r.iter().zip(p.iter()).any(|(a, b)| upper_unit(*a) != upper_unit(*b)) {
-        return Err(E_UNEXPECTED);
-    }
-    let mut i = r.len();
-    while i < p.len() && p[i] == b'\\' as u16 {
-        i += 1;
-    }
-    Ok(String::from_utf16_lossy(&p[i..]))
-}
+pub use crate::find::relative_file_name;
 
 pub fn leader_bytes(block: u64, size: u64, info: &FileInfo, name: &[u16]) -> Vec<u8> {
     let mut v = Vec::with_capacity(LEADER_SIZE + name.len() * 2 + 2);
@@ -158,7 +134,7 @@ pub fn leader_bytes(block: u64, size: u64, info: &FileInfo, name: &[u16]) -> Vec
     v
 }
 
-unsafe fn json_head(msg: *mut c_void, dest: &[u16], size: u64, info: &FileInfo, flags: u32) -> HRESULT {
+unsafe fn json_head(msg: *mut c_void, dest: &[u16], size: u64, info: &FileInfo, flags: u32, token: u64) -> HRESULT {
     let body = match new_object() {
         Ok(b) => b,
         Err(e) => return e,
@@ -172,7 +148,7 @@ unsafe fn json_head(msg: *mut c_void, dest: &[u16], size: u64, info: &FileInfo, 
         &|| set_u64(o, "CreationTime", info.creation),
         &|| set_u64(o, "LastAccessTime", info.access),
         &|| set_u64(o, "LastWriteTime", info.write),
-        &|| set_u64(o, "LastErrorToken", 0),
+        &|| set_u64(o, "LastErrorToken", token),
         &|| set_u64(o, "Flags", flags as u64),
     ];
     for s in steps {
@@ -184,12 +160,12 @@ unsafe fn json_head(msg: *mut c_void, dest: &[u16], size: u64, info: &FileInfo, 
     serialize_object(o, msg)
 }
 
-unsafe fn json_no_json_preamble(msg: *mut c_void, flags: u32) -> HRESULT {
+unsafe fn json_no_json_preamble(msg: *mut c_void, flags: u32, token: u64) -> HRESULT {
     let body = match new_object() {
         Ok(b) => b,
         Err(e) => return e,
     };
-    let hr = set_u64(body.0, "LastErrorToken", 0);
+    let hr = set_u64(body.0, "LastErrorToken", token);
     if hr < 0 {
         return hr;
     }
@@ -200,35 +176,59 @@ unsafe fn json_no_json_preamble(msg: *mut c_void, flags: u32) -> HRESULT {
     serialize_object(body.0, msg)
 }
 
-unsafe fn send_terminator(session: Session, timer: &mut Timer) {
+unsafe fn send_terminator(session: &mut dyn Channel, timer: &mut Timer) {
     timer.mark("ReadCpu");
     if let Ok(m) = new_message() {
         if let Ok(b) = new_object() {
             set_wstr(b.0, "FileName", &[]);
             serialize_object(b.0, m.0);
         }
-        session.send_more(m.0);
+        session.send(m.0);
     }
     timer.mark("WriteNetwork");
     timer.mark("ReadCpu");
 }
 
+pub struct Outgoing<'a> {
+    pub flags: u32,
+    pub no_json: bool,
+    pub token: u64,
+    pub root: &'a str,
+    pub pattern: &'a str,
+}
+
 #[allow(clippy::too_many_arguments)]
-unsafe fn send_one_file(session: Session, f: &FoundFile, dest: &[u16], flags: u32, timer: &mut Timer, no_json: bool, first_global: &mut bool, buf: &mut [u8]) -> HRESULT {
+unsafe fn send_one_file(session: &mut dyn Channel, f: &FoundFile, dest: &[u16], out: &Outgoing, timer: &mut Timer, first_global: &mut bool, buf: &mut [u8], notify: &mut Option<&mut dyn CopyNotify>) -> HRESULT {
     timer.mark("ReadCpu");
+    let flags = out.flags;
     let share = FILE_SHARE_READ | if flags & XTFCOPYFILE_SHAREWRITE != 0 { FILE_SHARE_WRITE } else { 0 };
     let h = match open_with_retry(&f.file_name, GENERIC_READ, share, OPEN_EXISTING, 0) {
         Ok(h) => h,
         Err(e) => return e,
     };
+    let dest_s = String::from_utf16_lossy(dest);
+    let mut size = 0u64;
+    let mut sent = 0u64;
+    let mut abort = false;
     let hr = 'file: {
-        let mut size = 0i64;
-        if GetFileSizeEx(h, &mut size) == 0 {
+        let mut sz = 0i64;
+        if GetFileSizeEx(h, &mut sz) == 0 {
             break 'file last_hr_or_fail();
         }
-        let size = size as u64;
+        size = sz as u64;
         timer.mark("ReadFileMeta");
-        let mut sent = 0u64;
+        if let Some(n) = notify.as_mut() {
+            let hr = n.start(out.root, out.pattern, &f.file_name, &f.info, &dest_s);
+            if hr < 0 {
+                abort = true;
+                break 'file hr;
+            }
+            let hr = n.progress(&f.file_name, &dest_s, size, 0);
+            if hr < 0 {
+                abort = true;
+                break 'file hr;
+            }
+        }
         let mut first = true;
         while sent < size || (size == 0 && first) {
             let msg = match new_message() {
@@ -236,10 +236,10 @@ unsafe fn send_one_file(session: Session, f: &FoundFile, dest: &[u16], flags: u3
                 Err(e) => break 'file e,
             };
             let mut payload: Vec<u8> = Vec::new();
-            if no_json {
+            if out.no_json {
                 if *first_global {
                     *first_global = false;
-                    let hr = json_no_json_preamble(msg.0, flags);
+                    let hr = json_no_json_preamble(msg.0, flags, out.token);
                     if hr < 0 {
                         break 'file hr;
                     }
@@ -248,7 +248,7 @@ unsafe fn send_one_file(session: Session, f: &FoundFile, dest: &[u16], flags: u3
                     payload = leader_bytes(DIRECT_PROTOCOL_BLOCK_SIZE, size, &f.info, dest);
                 }
             } else if first {
-                let hr = json_head(msg.0, dest, size, &f.info, flags);
+                let hr = json_head(msg.0, dest, size, &f.info, flags, out.token);
                 if hr < 0 {
                     break 'file hr;
                 }
@@ -274,20 +274,34 @@ unsafe fn send_one_file(session: Session, f: &FoundFile, dest: &[u16], flags: u3
                 }
             }
             timer.mark("ReadCpu");
-            let hr = session.send_more(msg.0);
+            let hr = session.send(msg.0);
             if hr < 0 {
                 break 'file hr;
             }
             timer.mark("WriteNetwork");
+            if let Some(n) = notify.as_mut() {
+                let hr = n.progress(&f.file_name, &dest_s, size, sent);
+                if hr < 0 {
+                    abort = true;
+                    break 'file hr;
+                }
+            }
         }
         S_OK
     };
     CloseHandle(h);
+    if abort && sent < size {
+        timer.mark("ReadCpu");
+        if let Ok(m) = new_message() {
+            session.send(m.0);
+        }
+        timer.mark("WriteNetwork");
+    }
     hr
 }
 
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn files_to_messages(session: Session, root: &str, files: &[FoundFile], dst: &[u16], dst_is_directory: bool, flags: u32, timer: &mut Timer, count: &mut u32, no_json: bool) -> HRESULT {
+pub unsafe fn files_to_messages(session: &mut dyn Channel, root: &str, files: &[FoundFile], dst: &[u16], dst_is_directory: bool, out: &Outgoing, timer: &mut Timer, count: &mut u32, mut notify: Option<&mut dyn CopyNotify>) -> HRESULT {
     *count = 0;
     let mut buf = vec![0u8; DIRECT_PROTOCOL_BLOCK_SIZE as usize];
     let mut first_global = true;
@@ -308,11 +322,18 @@ pub unsafe fn files_to_messages(session: Session, root: &str, files: &[FoundFile
         } else {
             dst.to_vec()
         };
-        hr = send_one_file(session, f, &dest, flags, timer, no_json, &mut first_global, &mut buf);
+        hr = send_one_file(session, f, &dest, out, timer, &mut first_global, &mut buf, &mut notify);
         if hr < 0 {
             break;
         }
         *count += 1;
+        if let Some(n) = notify.as_mut() {
+            let r = n.end(out.root, out.pattern, &f.file_name, &f.info, &String::from_utf16_lossy(&dest), hr);
+            if r < 0 {
+                hr = r;
+                break;
+            }
+        }
     }
     send_terminator(session, timer);
     hr
@@ -476,15 +497,22 @@ impl Writer {
             return S_OK;
         }
         if hr >= 0 {
-            let h = &self.head;
-            if unsafe { SetFileTime(self.handle, &h.creation, &h.access, &h.write) } == 0 {
-                return last_hr_or_fail();
-            }
             if self.no_buffering {
-                let r = self.truncate(h.size);
+                unsafe { CloseHandle(self.handle) };
+                self.handle = INVALID_HANDLE;
+                self.handle = match open_with_retry(&self.local, GENERIC_WRITE, FILE_SHARE_READ, OPEN_EXISTING, 0) {
+                    Ok(h) => h,
+                    Err(e) => return e,
+                };
+                self.no_buffering = false;
+                let r = self.truncate(self.head.size);
                 if r < 0 {
                     return r;
                 }
+            }
+            let h = &self.head;
+            if unsafe { SetFileTime(self.handle, &h.creation, &h.access, &h.write) } == 0 {
+                return last_hr_or_fail();
             }
             let r = file::set_file_attributes(&self.local, h.attributes);
             if r < 0 {
@@ -624,7 +652,7 @@ unsafe fn parse_leader(msg: *mut c_void) -> Result<Head, HRESULT> {
     Ok(Head::File { name: full, head: h, data_off: o.min(b.len()) })
 }
 
-pub unsafe fn messages_to_files(session: Session, request: *mut c_void, flags: u32, timer: &mut Timer, count: &mut u32, no_json: bool) -> HRESULT {
+pub unsafe fn messages_to_files(session: &mut dyn Channel, request: *mut c_void, flags: u32, timer: &mut Timer, count: &mut u32, no_json: bool, mut notify: Option<&mut dyn CopyNotify>) -> HRESULT {
     *count = 0;
     let mut pending = S_OK;
     let mut dst: Option<String> = None;
@@ -632,10 +660,11 @@ pub unsafe fn messages_to_files(session: Session, request: *mut c_void, flags: u
     let mut bufs: [Option<AlignedBuf>; 3] = [None, None, None];
     loop {
         let more;
-        let head_msg = if first {
+        let head_msg = if first && !request.is_null() {
             first = false;
             request
         } else {
+            first = false;
             timer.mark("WriteCpu");
             more = match session.receive_more(DEFAULT_RECEIVE_TIMEOUT) {
                 Ok(m) => m,
@@ -656,6 +685,18 @@ pub unsafe fn messages_to_files(session: Session, request: *mut c_void, flags: u
         if pending < 0 {
             return pending;
         }
+        let dst_s = dst.clone().unwrap_or_default();
+        let info = FileInfo { attributes: head.attributes, creation: head.creation, access: head.access, write: head.write, size: head.size };
+        if let Some(n) = notify.as_mut() {
+            let hr = n.start(&dst_s, &dst_s, &dst_s, &info, &dst_s);
+            if hr < 0 {
+                return hr;
+            }
+            let hr = n.progress(&dst_s, &dst_s, head.size, 0);
+            if hr < 0 {
+                return hr;
+            }
+        }
         if head.size <= head.block {
             timer.mark("WriteCpu");
             timer.mark("WriteFileMeta");
@@ -669,6 +710,18 @@ pub unsafe fn messages_to_files(session: Session, request: *mut c_void, flags: u
             *count += 1;
             timer.mark("WriteFileMeta");
             pending = write_small_file(dst.as_deref(), flags, &head, data);
+            if let Some(n) = notify.as_mut() {
+                if pending >= 0 {
+                    let hr = n.progress(&dst_s, &dst_s, head.size, head.size);
+                    if hr < 0 {
+                        return hr;
+                    }
+                }
+                let hr = n.end(&dst_s, &dst_s, &dst_s, &info, &dst_s, pending);
+                if hr < 0 {
+                    return hr;
+                }
+            }
             continue;
         }
         for b in bufs.iter_mut() {
@@ -723,6 +776,13 @@ pub unsafe fn messages_to_files(session: Session, request: *mut c_void, flags: u
             offset += head.block;
             k += 1;
             timer.mark("WriteFile");
+            if let Some(n) = notify.as_mut() {
+                let hr = n.progress(&dst_s, &dst_s, head.size, offset.min(head.size));
+                if hr < 0 {
+                    w.close(hr);
+                    return hr;
+                }
+            }
         }
         timer.mark("WriteCpu");
         let hr = w.close(S_OK);
@@ -731,5 +791,11 @@ pub unsafe fn messages_to_files(session: Session, request: *mut c_void, flags: u
         }
         timer.mark("WriteFileMeta");
         *count += 1;
+        if let Some(n) = notify.as_mut() {
+            let r = n.end(&dst_s, &dst_s, &dst_s, &info, &dst_s, hr);
+            if r < 0 {
+                return r;
+            }
+        }
     }
 }

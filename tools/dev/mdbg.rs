@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 #[path = "mdbg_heap.rs"]
 mod heap;
 
+fn ods_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
 type HANDLE = isize;
 
 #[repr(C)]
@@ -37,6 +41,8 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> HANDLE;
     fn GetProcAddress(h: HANDLE, name: *const u8) -> *mut c_void;
     fn OpenThread(access: u32, inherit: i32, tid: u32) -> HANDLE;
+    fn SuspendThread(h: HANDLE) -> u32;
+    fn ResumeThread(h: HANDLE) -> u32;
     fn GetThreadContext(h: HANDLE, ctx: *mut u8) -> i32;
     fn SetThreadContext(h: HANDLE, ctx: *const u8) -> i32;
     fn CloseHandle(h: HANDLE) -> i32;
@@ -140,14 +146,15 @@ fn main() {
 
     // MDBG_HANGDUMP=<secs>: once, that long after launch, print a stack scan of every thread
     // (for diagnosing stalls: which threads are blocked where).
-    let hangdump = std::env::var("MDBG_HANGDUMP").ok().and_then(|v| v.parse::<u64>().ok());
-    let mut hang_dumped = false;
+    let mut hangdump: Vec<u64> = std::env::var("MDBG_HANGDUMP").ok().map(|v| v.split([',', ' ']).filter_map(|x| x.trim().parse::<u64>().ok()).collect()).unwrap_or_default();
+    hangdump.sort_unstable();
+    hangdump.reverse();
     let mut tids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     loop {
-        if let Some(s) = hangdump {
-            if !hang_dumped && start.elapsed().as_secs() >= s {
-                hang_dumped = true;
-                eprintln!("[HANG] thread dump at {s}s ({} threads)", tids.len());
+        if let Some(&s) = hangdump.last() {
+            if start.elapsed().as_secs() >= s {
+                hangdump.pop();
+                eprintln!("[HANG] thread dump at {s}s unix_ms={} ({} threads)", ods_ms(), tids.len());
                 for &t in &tids {
                     dump_thread(hproc, t, &modules);
                 }
@@ -233,7 +240,7 @@ fn main() {
                     } else { String::from_utf8_lossy(&buf[..got]).into_owned() };
                     // The debug string includes its NUL terminator (and usually a newline).
                     let s = s.replace('\0', "");
-                    println!("[ODS] {}", s.trim_end_matches(['\n', '\r']));
+                    println!("[ODS] {} {}", ods_ms(), s.trim_end_matches(['\n', '\r']));
                     heap::on_ods(hproc, evt.tid, exe_base, tids.len(), &s, &modules);
                 }
             }
@@ -310,7 +317,7 @@ fn main() {
                             String::from_utf16_lossy(&u)
                         } else { String::from_utf8_lossy(&buf[..got]).into_owned() };
                         let s = s.trim_end_matches(['\0','\n','\r']);
-                        println!("[ODS] {s}");
+                        println!("[ODS] {} {s}", ods_ms());
                         heap::on_ods(hproc, evt.tid, exe_base, tids.len(), s, &modules);
                     }
                     status = DBG_CONTINUE;
@@ -580,11 +587,14 @@ fn capture_probe(hproc: HANDLE, tid: u32, xgr_base: u64) {
 /// Print rip + code-looking stack values of one thread (skips threads idle in the kernel
 /// with no title/compat frames near the top of their stack).
 fn dump_thread(hproc: HANDLE, tid: u32, modules: &BTreeMap<u64, String>) {
-    let hthread = unsafe { OpenThread(0x0008 | 0x0040, 0, tid) };
+    let hthread = unsafe { OpenThread(0x0002 | 0x0008 | 0x0040, 0, tid) };
     if hthread == 0 { return; }
+    let suspended = unsafe { SuspendThread(hthread) } != u32::MAX;
     let mut ctx = Ctx([0u8; 1256]);
     ctx.0[0x30..0x34].copy_from_slice(&0x0010_0003u32.to_le_bytes());
-    if unsafe { GetThreadContext(hthread, ctx.0.as_mut_ptr()) } == 0 {
+    let got_ctx = unsafe { GetThreadContext(hthread, ctx.0.as_mut_ptr()) } != 0;
+    if !got_ctx {
+        if suspended { unsafe { ResumeThread(hthread); } }
         unsafe { CloseHandle(hthread); }
         return;
     }
@@ -593,6 +603,7 @@ fn dump_thread(hproc: HANDLE, tid: u32, modules: &BTreeMap<u64, String>) {
     let mut buf = vec![0u8; 16384];
     let mut got = 0usize;
     unsafe { ReadProcessMemory(hproc, rsp as *const c_void, buf.as_mut_ptr(), buf.len(), &mut got); }
+    if suspended { unsafe { ResumeThread(hthread); } }
     let name = |v: u64| modules.range(..=v).next_back().filter(|(b, _)| v - **b < 0x6000000 && v > 0x10000).map(|(b, n)| format!("{} +0x{:x}", n, v - b));
     let mut lines = Vec::new();
     let mut i = 0;
@@ -762,8 +773,9 @@ fn capture_exit_extra(hproc: HANDLE, tid: u32, modules: &BTreeMap<u64, String>) 
         eprintln!("[EXIT] system memory: load={}% phys avail={:.0}/{:.0} MB commit avail={:.0}/{:.0} MB",
             ms.memory_load, ms.avail_phys as f64 / MB, ms.total_phys as f64 / MB, ms.avail_page_file as f64 / MB, ms.total_page_file as f64 / MB);
     }
-    let hthread = unsafe { OpenThread(0x0008 | 0x0040, 0, tid) };
+    let hthread = unsafe { OpenThread(0x0002 | 0x0008 | 0x0040, 0, tid) };
     if hthread == 0 { return; }
+    let suspended = unsafe { SuspendThread(hthread) } != u32::MAX;
     let mut ctx = Ctx([0u8; 1256]);
     ctx.0[0x30..0x34].copy_from_slice(&0x0010_0003u32.to_le_bytes());
     let ok = unsafe { GetThreadContext(hthread, ctx.0.as_mut_ptr()) };

@@ -819,15 +819,28 @@ pub fn on_table(list: usize, side: usize, param: u32, handle: u64) -> u64 {
             vec![Ref { heap, first: index, count: u32::MAX, kind: KIND_DEFAULT }]
         }
     };
-    lists(|m| {
+    let bound = lists(|m| {
         let s = m.entry(list).or_default();
         for r in new {
             if s.seen.insert(r) {
                 s.refs.push(r);
             }
         }
+        s.heaps.clone()
     });
+    if !table_heap_bound(&bound, heap) {
+        UNBOUND_TABLES.fetch_add(1, Ordering::Relaxed);
+        if once(20) {
+            record(M, TAG, &format!("descriptor table {handle:#x} (root parameter {param}) is in heap {heap:#x}, which is not among the heaps bound on list {list:#x} ({bound:x?}); on PC the table reads whatever heap is bound"));
+        }
+    }
     pc
+}
+
+pub static UNBOUND_TABLES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn table_heap_bound(bound: &[usize], heap: usize) -> bool {
+    bound.contains(&heap)
 }
 
 pub fn paint(iv: &[(u32, u32, u8)]) -> (Vec<(u32, u32, u8)>, u32) {

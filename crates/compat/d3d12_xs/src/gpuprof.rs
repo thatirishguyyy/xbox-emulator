@@ -290,7 +290,7 @@ unsafe fn report(s: &mut State) {
         "[gpuprof] window {}: {FRAMES} frames, {n} timed events ({bad} rejected), freq={freq} Hz | summed GPU {:.3} ms/frame, wall span {:.3} ms/frame\n",
         s.reports, per(total), span);
     for ((a, b, compute, kind), (t, c)) in rows.iter().take(40) {
-        let k = match kind { 0 => "draw", 1 => "drawidx", 2 => "dispatch", 3 => "indirect", _ => "?" };
+        let k = match kind { 0 => "draw", 1 => "drawidx", 2 => "dispatch", 3 => "indirect", 4 => "listhead", _ => "?" };
         out.push_str(&format!("[gpuprof]   {:7.3} ms/f {:5.1}% {:6.1} calls/f {k:8} {}\n",
             per(*t), *t as f64 * 100.0 / total.max(1) as f64, *c as f64 / FRAMES as f64, name(&Label { a: *a, b: *b, compute: *compute })));
     }
@@ -358,7 +358,11 @@ unsafe extern "system" fn h_reset(this: *mut c_void, alloc: *mut c_void, pso: *m
         on_set_pso(this as usize, pso as usize);
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) -> i32 = unsafe { core::mem::transmute(next(10)) };
-    unsafe { f(this, alloc, pso) }
+    let hr = unsafe { f(this, alloc, pso) };
+    if hr >= 0 && ARMED.load(Ordering::Relaxed) && unsafe { crate::fill::list_type(this) } != 1 {
+        unsafe { stamp(this, 4) };
+    }
+    hr
 }
 
 unsafe extern "system" fn h_set_pso(this: *mut c_void, pso: *mut c_void) {

@@ -312,7 +312,11 @@ struct Uploader {
     fence: *mut c_void,
     fence_value: u64,
     tracked: Vec<Tracked>,
-    retire: Vec<(u64, usize)>,
+    retire: Vec<(u64, usize, u64)>,
+    pool: Vec<(u64, usize)>,
+    pool_bytes: u64,
+    backlog: std::collections::VecDeque<(usize, Placed)>,
+    release_cursor: usize,
     cursor: usize,
     partial_cursor: usize,
     pumps: u64,
@@ -330,6 +334,7 @@ struct Uploader {
     cost_sum_us: u64,
     cost_max_us: u64,
     cost_n: u64,
+    reaper: crate::reaper::Reaper,
 }
 unsafe impl Send for Uploader {}
 
@@ -471,8 +476,16 @@ unsafe fn init(queue: *mut c_void) -> Result<Uploader, String> {
     if hr < 0 {
         return Err(format!("CreateFence hr={hr:#010x}"));
     }
+    let fence_addr = fence as usize;
+    let reaper = crate::reaper::Reaper::new(
+        move || unsafe { vcall!(fence_addr as *mut c_void, 8, fn() -> u64) },
+        |res| unsafe {
+            vcall!(res as *mut c_void, 2, fn() -> u32);
+        },
+    );
     Ok(Uploader {
-        device, alloc, list, fence, fence_value: 0, tracked: Vec::new(), retire: Vec::new(), cursor: 0, partial_cursor: 0,
+        reaper,
+        device, alloc, list, fence, fence_value: 0, tracked: Vec::new(), retire: Vec::new(), pool: Vec::new(), pool_bytes: 0, backlog: std::collections::VecDeque::new(), release_cursor: 0, cursor: 0, partial_cursor: 0,
         pumps: 0, uploaded_subs: 0, uploaded_bytes: 0, unreadable: 0, rejected: 0, recommitted: 0,
         zero_cursor: 0, zero_filled: 0, watch_changed: 0,
         index: Vec::new(), index_stale: true, ev: EventStats::default(), cost_sum_us: 0, cost_max_us: 0, cost_n: 0,
@@ -527,6 +540,7 @@ struct Staged {
     res: usize,
     state: u32,
     buf: *mut c_void,
+    size: u64,
     subs: Vec<(u32, Footprint)>,
 }
 
@@ -544,11 +558,17 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
         return None;
     }
     let gpu_owned = crate::placed::gpu_written(t.res);
-    let Some(whole) = scan_subs(t, &want) else { return None };
+    let ck = std::time::Instant::now();
+    let whole = scan_subs(t, &want);
+    stage_time(0, ck);
+    let Some(whole) = whole else { return None };
     for sub in want.into_iter().map(|s| s as u32) {
         let fp = t.fps[sub as usize];
         let (w_e, h_e) = ((fp.row_size / bpe as u64) as u32, fp.rows);
-        let Some(map) = t.layout.submap(sub, w_e, h_e) else {
+        let ck = std::time::Instant::now();
+        let map = t.layout.submap(sub, w_e, h_e);
+        stage_time(1, ck);
+        let Some(map) = map else {
             continue; // layout query failed for this subresource (counted at adoption time)
         };
         let base = t.p.va as usize;
@@ -583,7 +603,9 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
             Some(v) => v.as_slice(),
             None => core::slice::from_raw_parts(lo as *const u8, len),
         };
+        let ck = std::time::Instant::now();
         let h = hash_bytes(mem);
+        stage_time(2, ck);
         *hashed += mem.len() as u64;
         if t.hashes[sub as usize].is_none() && (gpu_owned || mem.iter().all(|&b| b == 0)) {
             // Never written by the title (fresh committed pages are zero). Do not upload:
@@ -606,15 +628,24 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
     let heap: [u32; 5] = [2 /* UPLOAD */, 0, 0, 1, 1];
     let mut bd = [0u8; 0x38];
     bd[0..4].copy_from_slice(&1u32.to_le_bytes());
-    bd[0x10..0x18].copy_from_slice(&t.total_bytes.to_le_bytes());
+    let size = pool_bucket(t.total_bytes);
+    bd[0x10..0x18].copy_from_slice(&size.to_le_bytes());
     bd[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
     bd[0x1c..0x1e].copy_from_slice(&1u16.to_le_bytes());
     bd[0x1e..0x20].copy_from_slice(&1u16.to_le_bytes());
     bd[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
     bd[0x2c..0x30].copy_from_slice(&1u32.to_le_bytes());
     let mut buf: *mut c_void = core::ptr::null_mut();
-    let hr = vcall!(device, 27, fn(*const u32, u32, *const u8, u32, *const c_void, *const Guid, *mut *mut c_void) -> i32,
-        heap.as_ptr(), 0, bd.as_ptr(), 0x2C3, core::ptr::null(), &IID_RESOURCE, &mut buf);
+    let ck = std::time::Instant::now();
+    STAGE_US[5].fetch_add(t.total_bytes, core::sync::atomic::Ordering::Relaxed);
+    let hr = match pool_take(&mut up.pool, &mut up.pool_bytes, size) {
+        Some(b) => {
+            buf = b as *mut c_void;
+            0
+        }
+        None => vcall!(device, 27, fn(*const u32, u32, *const u8, u32, *const c_void, *const Guid, *mut *mut c_void) -> i32,
+            heap.as_ptr(), 0, bd.as_ptr(), 0x2C3, core::ptr::null(), &IID_RESOURCE, &mut buf),
+    };
     if hr < 0 || buf.is_null() {
         record("d3d12_xs", "upload", &format!("upload buffer ({} bytes) FAILED hr={hr:#010x}", t.total_bytes));
         return None;
@@ -626,6 +657,8 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
         record("d3d12_xs", "upload", &format!("upload buffer Map FAILED hr={hr:#010x}"));
         return None;
     }
+    stage_time(3, ck);
+    let ck = std::time::Instant::now();
     let base = t.p.va as *const u8;
     let mut subs = Vec::with_capacity(changed.len());
     for (sub, map, h, snap) in changed {
@@ -642,10 +675,46 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
         subs.push((sub, fp));
     }
     vcall!(buf, 9, fn(u32, *const c_void) -> (), 0, core::ptr::null());
-    Some(Staged { res: t.res, state: t.p.init_state, buf, subs })
+    stage_time(4, ck);
+    Some(Staged { res: t.res, state: t.p.init_state, buf, size, subs })
 }
 
-const PARALLEL_DETILE_BYTES: usize = 1 << 20;
+static STAGE_US: [core::sync::atomic::AtomicU64; 6] = [const { core::sync::atomic::AtomicU64::new(0) }; 6];
+
+fn stage_time(i: usize, since: std::time::Instant) {
+    STAGE_US[i].fetch_add(since.elapsed().as_micros() as u64, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn take_stage_times() -> [u64; 6] {
+    core::array::from_fn(|i| STAGE_US[i].swap(0, core::sync::atomic::Ordering::Relaxed))
+}
+
+const PARALLEL_DETILE_BYTES: usize = 16 << 20;
+const ADOPT_BUDGET_US: u128 = 3_000;
+const RETIRE_BUDGET_US: u128 = 2_000;
+const RELEASE_BUDGET_US: u128 = 3_000;
+const POOL_CAP_BYTES: u64 = 256 << 20;
+const POOL_MIN_BUCKET: u64 = 64 << 10;
+
+fn pool_bucket(bytes: u64) -> u64 {
+    bytes.max(POOL_MIN_BUCKET).next_power_of_two()
+}
+
+fn pool_take(pool: &mut Vec<(u64, usize)>, pool_bytes: &mut u64, size: u64) -> Option<usize> {
+    let i = pool.iter().rposition(|&(s, _)| s == size)?;
+    let (s, b) = pool.swap_remove(i);
+    *pool_bytes -= s;
+    Some(b)
+}
+
+fn pool_give(pool: &mut Vec<(u64, usize)>, pool_bytes: &mut u64, size: u64, buf: usize, cap: u64) -> bool {
+    if *pool_bytes + size > cap {
+        return false;
+    }
+    pool.push((size, buf));
+    *pool_bytes += size;
+    true
+}
 
 unsafe fn detile_span(dst0: usize, pitch: usize, src0: usize, offs: &[u32], w_e: usize, rows: core::ops::Range<usize>, bpe: usize) {
     for y in rows {
@@ -725,6 +794,38 @@ fn watch_pending(up: &mut Uploader) -> (u64, u64) {
     (filled, changed)
 }
 
+struct PumpPhases {
+    t0: std::time::Instant,
+    last: std::time::Instant,
+    parts: Vec<(&'static str, u64)>,
+}
+
+impl PumpPhases {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        PumpPhases { t0: now, last: now, parts: Vec::new() }
+    }
+
+    fn mark(&mut self, what: &'static str) {
+        let now = std::time::Instant::now();
+        self.parts.push((what, (now - self.last).as_micros() as u64));
+        self.last = now;
+    }
+
+    fn report(&self, pump: u64, note: &str, fresh_visits: usize, staged: usize, bytes: u64) {
+        static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let total = self.t0.elapsed().as_micros() as u64;
+        let st = take_stage_times();
+        if total < 20_000 || N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 60 {
+            return;
+        }
+        let parts: Vec<String> = self.parts.iter().map(|(w, us)| format!("{w}={:.1}ms", *us as f64 / 1000.0)).collect();
+        record("d3d12_xs", "upload", &format!("slow pump {pump}: {:.1} ms on the present thread: {}; fresh visits={fresh_visits} staged={staged} hashed={} MB; inside check: residency-scan={:.1}ms submap={:.1}ms hash={:.1}ms upload-buffer-create+map={:.1}ms ({} MB) detile+unmap={:.1}ms{}",
+            total as f64 / 1000.0, parts.join(" "), bytes >> 20, st[0] as f64 / 1000.0, st[1] as f64 / 1000.0, st[2] as f64 / 1000.0, st[3] as f64 / 1000.0, st[5] >> 20, st[4] as f64 / 1000.0,
+            if note.is_empty() { String::new() } else { format!(" ({note})") }));
+    }
+}
+
 /// Called once per `PresentX`, on the presenting thread, before the frame is copied out.
 pub unsafe fn pump(queue: *mut c_void) {
     let t0 = std::time::Instant::now();
@@ -755,20 +856,28 @@ unsafe fn pump_inner(queue: *mut c_void) {
     }
     let up = guard.as_mut().unwrap();
     up.pumps += 1;
+    let mut ph = PumpPhases::start();
 
     // Retire upload buffers whose copy has completed.
     let done = vcall!(up.fence, 8, fn() -> u64);
-    up.retire.retain(|&(v, b)| {
-        if v <= done {
-            vcall!(b as *mut c_void, 2, fn() -> u32);
+    let budget = std::time::Instant::now();
+    let (pool, pool_bytes, reaper) = (&mut up.pool, &mut up.pool_bytes, &up.reaper);
+    up.retire.retain(|&(v, b, size)| {
+        if v <= done && budget.elapsed().as_micros() < RETIRE_BUDGET_US {
+            if !pool_give(pool, pool_bytes, size, b, POOL_CAP_BYTES) && !reaper.push(b, 0) {
+                vcall!(b as *mut c_void, 2, fn() -> u32);
+            }
             false
         } else {
             true
         }
     });
+    ph.mark("retire");
 
-    // Adopt newly placed resources (the registry already holds a reference on each).
-    for (res, p) in crate::placed::drain_new() {
+    up.backlog.extend(crate::placed::drain_new());
+    let budget = std::time::Instant::now();
+    while budget.elapsed().as_micros() < ADOPT_BUDGET_US {
+        let Some((res, p)) = up.backlog.pop_front() else { break };
         match adopt(up, res as *mut c_void, p.clone()) {
             Ok(t) => {
                 up.tracked.push(t);
@@ -786,27 +895,42 @@ unsafe fn pump_inner(queue: *mut c_void) {
             }
         }
     }
+    ph.mark("adopt");
 
     // Drop textures the title has released (ours is the last reference).
-    let mut i = 0;
-    while i < up.tracked.len() {
+    let budget = std::time::Instant::now();
+    let n = up.tracked.len();
+    let mut seen = 0;
+    let mut freed = 0u32;
+    while seen < n && !up.tracked.is_empty() {
+        if freed > 0 && budget.elapsed().as_micros() >= RELEASE_BUDGET_US {
+            break;
+        }
+        let i = up.release_cursor % up.tracked.len();
         let r = up.tracked[i].res as *mut c_void;
+        seen += 1;
         vcall!(r, 1, fn() -> u32);
         if vcall!(r, 2, fn() -> u32) == 1 {
             crate::placed::forget(r);
-            vcall!(r, 2, fn() -> u32);
+            if !up.reaper.push(r as usize, up.fence_value) {
+                vcall!(r, 2, fn() -> u32);
+            }
             up.tracked.swap_remove(i);
             up.index_stale = true;
+            freed += 1;
         } else {
-            i += 1;
+            up.release_cursor = i + 1;
         }
     }
 
+    ph.mark("release");
     let notes = take_notes();
     apply_notes(up, &notes);
+    ph.mark("notes");
 
     // The single upload list/allocator can be reused only once the previous copy is done.
     if done < up.fence_value {
+        ph.report(up.pumps, "previous upload copy still in flight", 0, 0, 0);
         return;
     }
 
@@ -842,9 +966,11 @@ unsafe fn pump_inner(queue: *mut c_void) {
     if poll {
         up.partial_cursor = if nt == 0 { 0 } else { (up.partial_cursor + k) % nt };
     }
+    ph.mark("partial-rescan");
     let (filled, changed) = watch_pending(up);
     up.zero_filled += filled;
     up.watch_changed += changed;
+    ph.mark("zero-watch");
     let mut staged: Vec<Staged> = Vec::new();
     let mut hashed = 0u64;
     let n = up.tracked.len();
@@ -866,6 +992,8 @@ unsafe fn pump_inner(queue: *mut c_void) {
         }
     }
     FRESH_CURSOR.store(if last >= n { 0 } else { last }, core::sync::atomic::Ordering::Relaxed);
+    ph.mark("fresh-hash+stage");
+    let fresh_staged = staged.len();
     let mut rehashed = 0u64;
     let mut visited = 0;
     while poll && n > 0 && visited < n.min(RECHECK_TEXTURES_PER_FRAME) && rehashed < RECHECK_BUDGET && (visited == 0 || std::time::Instant::now() < deadline) {
@@ -876,6 +1004,7 @@ unsafe fn pump_inner(queue: *mut c_void) {
             staged.push(s);
         }
     }
+    ph.mark("recheck");
 
     if !staged.is_empty() {
         const COPY_DEST: u32 = 0x400;
@@ -913,9 +1042,11 @@ unsafe fn pump_inner(queue: *mut c_void) {
         up.fence_value += 1;
         vcall!(queue, 14, fn(*mut c_void, u64) -> i32, up.fence, up.fence_value);
         for s in &staged {
-            up.retire.push((up.fence_value, s.buf as usize));
+            up.retire.push((up.fence_value, s.buf as usize, s.size));
         }
     }
+    ph.mark("record+submit");
+    ph.report(up.pumps, "", fresh_visits, fresh_staged, hashed + rehashed);
 
     if (!staged.is_empty() && up.pumps < 40) || up.pumps % 600 == 0 {
         let (gh, gn) = crate::placed::gpu_write_stats();
@@ -945,8 +1076,9 @@ unsafe fn pump_inner(queue: *mut c_void) {
         up.cost_max_us = 0;
         up.cost_n = 0;
         record("d3d12_xs", "upload", &format!(
-            "pump {}: staged {} textures; tracked={} total uploaded {} subresources / {} bytes; unreadable-skips={} not-mirrored={} gpu-copy-dest hits={gh} textures={gn} inserted-slot-calls={} texcache-flushes={} recommit-rechecks={}",
-            up.pumps, staged.len(), up.tracked.len(), up.uploaded_subs, up.uploaded_bytes, up.unreadable, up.rejected, crate::cmdlist_wrap::inserted_hits(), crate::cmdlist_wrap::flush_hits(), up.recommitted));
+            "pump {}: staged {} textures; tracked={} total uploaded {} subresources / {} bytes; unreadable-skips={} not-mirrored={} gpu-copy-dest hits={gh} textures={gn} inserted-slot-calls={} texcache-flushes={} recommit-rechecks={}; reaper pending={} freed={} worst-release={:.1}ms",
+            up.pumps, staged.len(), up.tracked.len(), up.uploaded_subs, up.uploaded_bytes, up.unreadable, up.rejected, crate::cmdlist_wrap::inserted_hits(), crate::cmdlist_wrap::flush_hits(), up.recommitted,
+            up.reaper.pending(), up.reaper.freed(), up.reaper.worst_us() as f64 / 1000.0));
     }
 }
 
@@ -978,7 +1110,7 @@ mod zero_watch_tests {
 
     #[test]
     fn parallel_detile_matches_serial() {
-        let (w, h, bpe, pitch) = (512usize, 640usize, 4usize, 2048usize + 256);
+        let (w, h, bpe, pitch) = (2048usize, 2176usize, 4usize, 8192usize + 256);
         let src: Vec<u8> = (0..w * h * bpe).map(|i| (i * 7 + i / 3) as u8).collect();
         let offs: Vec<u32> = (0..w * h).map(|i| (((i * 2654435761usize) % (w * h)) * bpe) as u32).collect();
         let mut a = vec![0u8; pitch * h];
@@ -1000,5 +1132,52 @@ mod zero_watch_tests {
         TomboxNoteTitleMemory(0x12000, 0x1000, NOTE_COMMITTED);
         TomboxNoteTitleMemory(0, 0x1000, NOTE_WRITTEN);
         assert_eq!(take_notes(), vec![(0x10000, 0x2000, NOTE_WRITTEN), (0x12000, 0x1000, NOTE_COMMITTED)]);
+    }
+}
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    #[test]
+    fn buckets_round_up_to_powers_of_two_with_a_floor() {
+        assert_eq!(pool_bucket(1), 64 << 10);
+        assert_eq!(pool_bucket(64 << 10), 64 << 10);
+        assert_eq!(pool_bucket((64 << 10) + 1), 128 << 10);
+        assert_eq!(pool_bucket(5 << 20), 8 << 20);
+    }
+
+    #[test]
+    fn pool_reuses_exact_buckets_and_respects_the_cap() {
+        let (mut pool, mut bytes) = (Vec::new(), 0u64);
+        assert!(pool_give(&mut pool, &mut bytes, 1 << 20, 0xa, 3 << 20));
+        assert!(pool_give(&mut pool, &mut bytes, 2 << 20, 0xb, 3 << 20));
+        assert!(!pool_give(&mut pool, &mut bytes, 1 << 20, 0xc, 3 << 20));
+        assert_eq!(bytes, 3 << 20);
+        assert_eq!(pool_take(&mut pool, &mut bytes, 4 << 20), None);
+        assert_eq!(pool_take(&mut pool, &mut bytes, 2 << 20), Some(0xb));
+        assert_eq!(bytes, 1 << 20);
+        assert_eq!(pool_take(&mut pool, &mut bytes, 1 << 20), Some(0xa));
+        assert_eq!(pool_take(&mut pool, &mut bytes, 1 << 20), None);
+        assert_eq!(bytes, 0);
+    }
+}
+#[cfg(test)]
+mod detile_speed_tests {
+    use super::*;
+
+    #[test]
+    fn one_megabyte_detiles_on_one_thread_in_a_few_ms() {
+        let (w, h, bpe) = (512usize, 512usize, 4usize);
+        let pitch = w * bpe;
+        let src: Vec<u8> = (0..w * h * bpe).map(|i| (i * 13) as u8).collect();
+        let offs: Vec<u32> = (0..w * h).map(|i| (((i * 2654435761usize) % (w * h)) * bpe) as u32).collect();
+        let mut dst = vec![0u8; pitch * h];
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            unsafe { detile_span(dst.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe) };
+        }
+        let per = t.elapsed().as_secs_f64() * 100.0;
+        eprintln!("single-thread detile of 1 MB: {per:.2} ms");
+        assert!(per < 20.0, "{per} ms");
     }
 }

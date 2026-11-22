@@ -2,6 +2,7 @@ use crate::chk::chk;
 use crate::console::*;
 use crate::server::{RUN_FLAG_REDIRECT_INPUT, RUN_FLAG_REDIRECT_MASK, RUN_FLAG_REDIRECT_OUTPUT, RUN_FLAG_WAIT, RUN_OPERATION_ID};
 use crate::win::{GetTickCount64, Sleep, E_POINTER};
+use crate::variant::ConsoleCopy;
 use crate::REMOTE_RUN_EXTENSION_ID;
 use core::ptr::null_mut;
 use std::sync::Mutex;
@@ -86,6 +87,8 @@ pub struct RemoteRunClient {
     pub vtbl2: *const RemoteRunClient2Vtbl,
     refs: Mutex<RefState>,
     pub address: BSTR,
+    pub copy: ConsoleCopy,
+    session: Mutex<Com>,
 }
 
 fn ckc(func: &str, line: u32, name: &str, hr: HRESULT, msg: &str) {
@@ -267,6 +270,42 @@ pub unsafe fn open_vm_session(conn: *const u16, port: u32, out: *mut Obj) -> HRE
     S_OK
 }
 
+pub unsafe fn open_session_impl_19041(conn: *const u16, port: u32, ext: *const GUID, iid: *const GUID, out: *mut Obj) -> HRESULT {
+    let mut ip: BSTR = null_mut();
+    let mut key: BSTR = null_mut();
+    let mut explicit = 0u32;
+    let hr = split_console_address(conn, port, &mut ip, &mut key, &mut explicit);
+    if hr < 0 {
+        log_api(b"SplitConsoleAddress( connectionString, port, &consoleIpAddress, &sessionKey, &explicitPort)\0", hr, API_CPP, 0xa4);
+        free_bstr(key);
+        free_bstr(ip);
+        return hr;
+    }
+    let mut opts = OpenSessionOptions { size: OPEN_OPTIONS_SIZE, session_key: [0; SESSION_KEY_CHARS], skip_ready_check: 0, allow_unneeded_key: 0, quiet: 0, reserved: 0, timeout_ms: DEFAULT_OPEN_SESSION_TIMEOUT_MS as u32 };
+    if !key.is_null() {
+        let n = wcslen(key);
+        if n >= SESSION_KEY_CHARS {
+            std::process::abort();
+        }
+        core::ptr::copy_nonoverlapping(key, opts.session_key.as_mut_ptr(), n);
+    }
+    let hr = xbtp_open_session2(ip, port, &opts, ext, iid, out);
+    if hr < 0 {
+        log_api(b"XbtpOpenSession2( consoleIpAddress, explicitPort, &auxInfo, extensionId, iid, ppvObject)\0", hr, API_CPP, 0xc6);
+    }
+    free_bstr(key);
+    free_bstr(ip);
+    hr
+}
+
+pub unsafe fn open_vm_session_19041(conn: *const u16, port: u32, out: *mut Obj) -> HRESULT {
+    let hr = open_session_impl_19041(conn, port, &REMOTE_RUN_EXTENSION_ID, &IID_XBTP_CLIENT_SESSION, out);
+    if hr < 0 {
+        log_api(b"XtfOpenSessionImpl( connectionString, overridePort, true, nullptr, extensionId, iid, ppvObject, &kDefaultOpenSessionTimeoutMS)\0", hr, API_CPP, 0xe0);
+    }
+    hr
+}
+
 type ReceiveMessageFn = unsafe extern "system" fn(Obj, u32, u32, *mut i16, *mut i32, *mut Obj) -> HRESULT;
 
 pub unsafe fn session_receive_message(session: Obj, timeout: u32, exchange: u32, message_type: &mut i16, status: &mut i32, out: *mut Obj) -> HRESULT {
@@ -434,7 +473,7 @@ pub unsafe fn send_result_message(session: Obj, exchange: u32, result: HRESULT) 
 
 impl RemoteRunClient {
     pub unsafe fn new(address: *const u16, create_result: &mut HRESULT) -> *mut RemoteRunClient {
-        let c = Box::into_raw(Box::new(RemoteRunClient { vtbl: &CLIENT_VTBL, vtbl2: &CLIENT2_VTBL, refs: Mutex::new(RefState { refs: 1, destroying: false }), address: null_mut() }));
+        let c = Box::into_raw(Box::new(RemoteRunClient { vtbl: &CLIENT_VTBL, vtbl2: &CLIENT2_VTBL, refs: Mutex::new(RefState { refs: 1, destroying: false }), address: null_mut(), copy: crate::variant::current(), session: Mutex::new(Com::null()) }));
         let mut hr = S_OK;
         if !address.is_null() && *address != 0 {
             (*c).address = SysAllocString(address);
@@ -615,6 +654,155 @@ impl RemoteRunClient {
     }
 }
 
+impl RemoteRunClient {
+    pub unsafe fn run_19041(&self, command: *const u16, directory: *const u16, flags: u32, period: u32, callback: Obj) -> HRESULT {
+        const F: &str = "RemoteRunClient::Run";
+        let mut flags = flags;
+        let mut raw: BSTR = null_mut();
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut callback_ex = Com::null();
+        let mut exchange = 0u32;
+        let mut message_type: i16 = XBTP_MESSAGE_TYPE_END;
+        let default_wd = w(crate::launch::DEFAULT_WORKING_DIRECTORY);
+        let hr = 'run: {
+            if command.is_null() || *command == 0 {
+                ckc(F, 649, "E_INVALIDARG", E_INVALIDARG, "Command line is required");
+                break 'run E_INVALIDARG;
+            }
+            let directory = if directory.is_null() || *directory == 0 { default_wd.as_ptr() } else { directory };
+            if flags & RUN_FLAG_REDIRECT_MASK != 0 {
+                flags |= RUN_FLAG_WAIT;
+                if callback.is_null() {
+                    ckc(F, 663, "E_INVALIDARG", E_INVALIDARG, "Callback must be supplied if either of the redirection flags are supplied");
+                    break 'run E_INVALIDARG;
+                }
+            }
+            let mut port = 0u32;
+            let mut hr = split_console_address(self.address, XBTP_PORT_SYSTEM, &mut raw, null_mut(), &mut port);
+            if hr < 0 {
+                log_api(b"SplitConsoleAddress( connectionString, defaultPort, consoleAddress, nullptr, port)\0", hr, CONSOLE_ADDRESS_CPP, 0xd7);
+            } else {
+                hr = S_OK;
+            }
+            ckc(F, 675, "SplitConsoleAddress( m_strAddress, XBTP_PORT_SYSTEM, &rawAddress, &port)", hr, "");
+            if hr < 0 {
+                break 'run hr;
+            }
+            session.reset();
+            let first = open_vm_session_19041(raw, port, session.put());
+            if first < 0 {
+                port |= XBTP_PORT_KIND_LINK;
+                session.reset();
+                if open_vm_session_19041(raw, port, session.put()) < 0 {
+                    ckc(F, 696, "hr", first, "");
+                    break 'run first;
+                }
+            }
+            let mut separated = false;
+            if !callback.is_null() {
+                separated = com::query_interface(callback, &IID_XTF_REMOTE_RUN_CALLBACK_EX, callback_ex.put()) >= 0;
+            }
+            let hr = send_start_message(session.get(), command, directory, flags, period, separated, &mut exchange);
+            ckc(F, 710, "SendStartMessage(m_session, pszCommandLine, pszWorkingDirectory, dwFlags, dwPeriod, fSupportsSeparatedStdErr, &exchangeId)", hr, "");
+            if hr < 0 {
+                break 'run hr;
+            }
+            let mut sleep = true;
+            loop {
+                if sleep && period != 0 {
+                    Sleep(period);
+                }
+                sleep = true;
+                let mut reply = Com::null();
+                let mut reply_body = Com::null();
+                let mut status = 0i32;
+                let hr = session_receive_message(session.get(), 0, exchange, &mut message_type, &mut status, reply.put());
+                if hr == E_PENDING {
+                    drop(reply);
+                    if flags & RUN_FLAG_REDIRECT_INPUT != 0 {
+                        let hr = send_console_input(callback, session.get(), exchange);
+                        ckc(F, 813, "SendConsoleInput(pCallback, m_session, exchangeId)", hr, "");
+                        if hr < 0 {
+                            break 'run hr;
+                        }
+                    }
+                    continue;
+                }
+                if hr < 0 {
+                    ckc(F, 750, "hr", hr, "m_session->receive failed");
+                    break 'run hr;
+                }
+                let hr = deserialize_body(reply.get(), reply_body.put());
+                ckc(F, 755, "XtfDeserializeJsonBody(reply, &replyBody)", hr, "");
+                if hr < 0 {
+                    break 'run hr;
+                }
+                if message_type == XBTP_MESSAGE_TYPE_MORE {
+                    if flags & RUN_FLAG_REDIRECT_OUTPUT == 0 {
+                        ckc(F, 803, "E_UNEXPECTED", E_UNEXPECTED, "Unexpected message");
+                        break 'run E_UNEXPECTED;
+                    }
+                    let mut msg_id = 0u32;
+                    let n = w(P_MSG_ID);
+                    let hr = get_json_u32(reply_body.get(), n.as_ptr(), &mut msg_id);
+                    ckc(F, 760, "XtfGetJsonProperty(replyBody, MsgIdProperty, &msgId)", hr, "");
+                    if hr < 0 {
+                        break 'run hr;
+                    }
+                    if msg_id == MSGID_RUN_OUTPUT {
+                        let hr = recv_console_output(callback, reply.get());
+                        ckc(F, 763, "RecvConsoleOutput(pCallback, reply)", hr, "");
+                        if hr < 0 {
+                            break 'run hr;
+                        }
+                    } else if msg_id == MSGID_RUN_ERROR {
+                        if callback_ex.is_null() {
+                            ckc(F, 771, "E_UNEXPECTED", E_UNEXPECTED, "");
+                            break 'run E_UNEXPECTED;
+                        }
+                        let hr = recv_console_error_output(callback_ex.get(), reply.get());
+                        ckc(F, 774, "RecvConsoleErrorOutput(spCallbackEx, reply)", hr, "");
+                        if hr < 0 {
+                            break 'run hr;
+                        }
+                    }
+                    sleep = false;
+                    continue;
+                }
+                if message_type != XBTP_MESSAGE_TYPE_END {
+                    ckc(F, 803, "E_UNEXPECTED", E_UNEXPECTED, "Unexpected message");
+                    break 'run E_UNEXPECTED;
+                }
+                let mut results = OperationError::default();
+                let hr = results.initialize(reply.get());
+                ckc(F, 781, "opResults.Initialize(reply)", hr, "");
+                if hr < 0 {
+                    break 'run hr;
+                }
+                let reply_result = results.return_code;
+                ckc(F, 782, "opResults.GetReturnCode(&replyResult)", S_OK, "");
+                if reply_result < 0 {
+                    ckc(F, 797, "replyResult", reply_result, "");
+                    break 'run reply_result;
+                }
+                let mut code = 0u32;
+                let n = w(P_EXIT_CODE);
+                if get_json_u32(reply_body.get(), n.as_ptr(), &mut code) < 0 {
+                    ckc(F, 792, "replyResult", reply_result, "");
+                    break 'run reply_result;
+                }
+                ckc(F, 788, "dwExitCode", code as i32, "");
+                break 'run code as i32;
+            }
+        };
+        if message_type != XBTP_MESSAGE_TYPE_END {
+            send_result_message(session.get(), exchange, hr);
+        }
+        free_bstr(raw);
+        hr
+    }
+}
+
 impl Drop for RemoteRunClient {
     fn drop(&mut self) {
         unsafe {
@@ -631,7 +819,7 @@ unsafe extern "system" fn client_qi(this: *mut RemoteRunClient, iid: *const GUID
     let iid = &*iid;
     let p = if *iid == IID_XTF_REMOTE_RUN_CLIENT || *iid == IID_IUNKNOWN || *iid == IID_XTF_REMOTE_RUN_CLIENT_BASE {
         this as Obj
-    } else if *iid == IID_XTF_REMOTE_RUN_CLIENT2 {
+    } else if *iid == IID_XTF_REMOTE_RUN_CLIENT2 && (*this).copy.has_client2() {
         RemoteRunClient::ex(this)
     } else {
         return E_NOINTERFACE;
@@ -662,7 +850,10 @@ unsafe extern "system" fn client_release(this: *mut RemoteRunClient) -> u32 {
 }
 
 unsafe extern "system" fn client_run(this: *mut RemoteRunClient, command: *const u16, directory: *const u16, flags: u32, period: u32, callback: Obj) -> HRESULT {
-    (*this).run_ex(command, directory, flags, period, callback, null_mut())
+    match (*this).copy {
+        ConsoleCopy::Build19041 => (*this).run_19041(command, directory, flags, period, callback),
+        ConsoleCopy::Build22000 => (*this).run_ex(command, directory, flags, period, callback, null_mut()),
+    }
 }
 
 unsafe extern "system" fn ex_qi(this: Obj, iid: *const GUID, out: *mut Obj) -> HRESULT {

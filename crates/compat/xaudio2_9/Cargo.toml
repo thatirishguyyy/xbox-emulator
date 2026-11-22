@@ -3,7 +3,7 @@ name = "xaudio2_9"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox console XAudio2_9.dll: the 10 console exports at the console ordinals, delegating to the host System32 XAudio2_9.dll, plus the console-only behaviour (default processor 0x20, XMA2 source voices decoded in software through the shared xma crate when the engine is created without XAUDIO2 flag 0x400)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

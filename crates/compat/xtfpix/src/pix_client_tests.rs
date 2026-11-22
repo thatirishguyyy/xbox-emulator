@@ -8,7 +8,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use xbtp::xbtp2_ext::{Message, MetadataVtbl, IID_XBTP_EXTENSION_METADATA};
+use xbtp::xbtp2_ext::{EndMessage, Message, MetadataVtbl, IID_XBTP_EXTENSION_METADATA};
 
 const TITLE_TCP_PORT: u32 = 0x107d;
 const HOST_TCP_PORT: u32 = 0x1069;
@@ -149,7 +149,7 @@ unsafe fn on_op(op: u32, session: usize, received: usize, out: usize) -> HRESULT
         return S_OK;
     }
     if !s.reply.is_empty() {
-        let m = out as *mut Message;
+        let m = out as *mut EndMessage;
         let t = w(&s.reply);
         assert_eq!(((*(*m).vtbl).set_json_body_w)(m, t.as_ptr()), S_OK);
     }
@@ -188,7 +188,7 @@ unsafe extern "system" fn f_diag(_s: usize, received: usize, out: usize) -> HRES
     let rm = received as *mut c_void;
     lock(&SEEN).push((0x1000 | OP_RETRIEVE_DIAGNOSTICS, json_of(rm), bin_of(rm)));
     let r = lock(&DIAG_REPLY).clone();
-    let m = out as *mut Message;
+    let m = out as *mut EndMessage;
     let t = w(&r);
     assert_eq!(((*(*m).vtbl).set_json_body_w)(m, t.as_ptr()), S_OK);
     S_OK
@@ -366,48 +366,10 @@ fn finish(c: Client, srv: Server) {
 
 static REAL_SERVER: AtomicUsize = AtomicUsize::new(0);
 
-#[repr(C)]
-struct ReplyShim {
-    vtbl: *const [usize; 10],
-    inner: *mut c_void,
-}
-
-unsafe fn shim_inner(this: *mut c_void) -> *mut c_void {
-    (*(this as *mut ReplyShim)).inner
-}
-
-unsafe extern "system" fn rs_qi(_: *mut c_void, _: *const GUID, _: *mut *mut c_void) -> HRESULT {
-    E_NOINTERFACE
-}
-
-unsafe extern "system" fn rs_ref(_: *mut c_void) -> u32 {
-    1
-}
-
-unsafe extern "system" fn rs_get(this: *mut c_void, n: *mut u32, p: *mut *mut u8) -> HRESULT {
-    let i = shim_inner(this);
-    let f: unsafe extern "system" fn(*mut c_void, *mut u32, *mut *mut u8) -> HRESULT = core::mem::transmute(slot(i, 3));
-    f(i, n, p)
-}
-
-unsafe extern "system" fn rs_get_binary(this: *mut c_void, n: *mut u32, p: *mut *mut u8) -> HRESULT {
-    let i = shim_inner(this);
-    let f: unsafe extern "system" fn(*mut c_void, *mut u32, *mut *mut u8) -> HRESULT = core::mem::transmute(slot(i, 4));
-    f(i, n, p)
-}
-
-unsafe extern "system" fn rs_set_w(this: *mut c_void, s: *const u16) -> HRESULT {
-    let i = shim_inner(this);
-    let f: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT = core::mem::transmute(slot(i, 7));
-    f(i, s)
-}
-
 unsafe fn forward(op: u32, session: usize, received: usize, reply: usize) -> HRESULT {
     let h = crate::server::handler_ptr(REAL_SERVER.load(Ordering::Acquire) as *mut c_void, op);
-    let vt: &'static [usize; 10] = Box::leak(Box::new([rs_qi as *const () as usize, rs_ref as *const () as usize, rs_ref as *const () as usize, rs_get as *const () as usize, rs_get_binary as *const () as usize, 0, rs_set_w as *const () as usize, rs_set_w as *const () as usize, 0, 0]));
-    let mut shim = ReplyShim { vtbl: vt, inner: reply as *mut c_void };
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> HRESULT = core::mem::transmute(slot(h, 4));
-    f(h, session as *mut c_void, received as *mut c_void, &mut shim as *mut ReplyShim as *mut c_void)
+    f(h, session as *mut c_void, received as *mut c_void, reply as *mut c_void)
 }
 
 macro_rules! fwd_fn {

@@ -33,7 +33,7 @@ impl Drop for ForceNull {
     }
 }
 
-unsafe fn call(f: OperationFnRaw, session: usize, request: Option<&str>) -> (HRESULT, String) {
+pub(crate) unsafe fn call(f: OperationFnRaw, session: usize, request: Option<&str>) -> (HRESULT, String) {
     let req = match request {
         Some(j) => message_with_json(j),
         None => Com::null(),
@@ -44,9 +44,9 @@ unsafe fn call(f: OperationFnRaw, session: usize, request: Option<&str>) -> (HRE
     (hr, text)
 }
 
-type OperationFnRaw = unsafe extern "system" fn(usize, usize, usize) -> HRESULT;
+pub(crate) type OperationFnRaw = unsafe extern "system" fn(usize, usize, usize) -> HRESULT;
 
-fn operation_error(hr: HRESULT, line: u32) -> String {
+pub(crate) fn operation_error(hr: HRESULT, line: u32) -> String {
     format!("\"XtfOperationError\":{{\"ReturnCode\":{},\"Checkpoint\":0,\"Errors\":[\"Error 0x{:X} File xbox\\\\devex\\\\xtf\\\\dll\\\\debugmonitor\\\\server.cpp : {}\"]}}", hr, hr as u32, line)
 }
 
@@ -212,7 +212,7 @@ fn parse(s: &str) -> J {
     v
 }
 
-fn canon(s: &str) -> String {
+pub(crate) fn canon(s: &str) -> String {
     parse(s).render()
 }
 

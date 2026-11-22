@@ -3,7 +3,7 @@ name = "compat-common"
 version = "0.1.0"
 edition = "2021"
 description = "Shared call-logging for TomBox Xbox compat stub/shim DLLs."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "compat_common"

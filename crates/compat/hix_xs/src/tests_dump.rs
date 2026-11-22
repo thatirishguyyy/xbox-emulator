@@ -18,10 +18,10 @@ fn summary() -> Vec<u8> {
 #[test]
 fn kmd_declines_unmapped_capture_commands_and_serves_control_ones() {
     let _g = crate::tests::LOCK.lock().unwrap();
-    for c in [0xf, 0x17, 0x28, 0x29] {
+    for c in [0xf, 0x17] {
         assert!(hang_stream::served(c), "{c:#x}");
     }
-    for c in [0x10, 0x13, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x2a, 0x1234] {
+    for c in [0x28, 0x29, 0x10, 0x13, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x2a, 0x1234] {
         assert!(!hang_stream::served(c), "{c:#x}");
     }
     unsafe {
@@ -29,7 +29,7 @@ fn kmd_declines_unmapped_capture_commands_and_serves_control_ones() {
         let data = kmd::region0();
         let ring = [kmd::DOORBELL_MAGIC, 1];
         let mut ret = 0u32;
-        for (cmd, status) in [(CMD_SQ_DUMP, E_NOTIMPL), (CMD_HALT_WAVES, 0)] {
+        for (cmd, status) in [(CMD_SQ_DUMP, E_NOTIMPL), (CMD_HALT_WAVES, E_NOTIMPL), (CMD_UNHALT_WAVES, E_NOTIMPL), (hang_stream::CMD_DISARM, 0)] {
             let seq = ((mb + kmd::MAILBOX_SEQ) as *const u32).read_volatile();
             ((mb + kmd::MAILBOX_CMD) as *mut u32).write_volatile(cmd);
             ((mb + kmd::MAILBOX_SEQ) as *mut u32).write_volatile(seq + 1);
@@ -45,9 +45,7 @@ fn kmd_declines_unmapped_capture_commands_and_serves_control_ones() {
 fn console_write_hang_dump_takes_its_failed_capture_path() {
     let s = crate::tests_kmd::scratch();
     let _g = crate::tests::LOCK.lock().unwrap();
-    if console::module() == 0 {
-        return;
-    }
+    assert_ne!(console::module(), 0, "console hix_xs.dll not found (TOMBOX_HIX_XS_CONSOLE, hix_xs_console.dll beside the DLL, or a title EmbeddedXvd dump); this test needs it");
     unsafe {
         crate::tests::init_hix(sink as *const () as usize);
         let report = summary();
@@ -78,9 +76,7 @@ fn console_write_hang_dump_takes_its_failed_capture_path() {
 fn console_debug_live_reports_no_live_debugging() {
     crate::tests_kmd::scratch();
     let _g = crate::tests::LOCK.lock().unwrap();
-    if console::module() == 0 {
-        return;
-    }
+    assert_ne!(console::module(), 0, "console hix_xs.dll not found (TOMBOX_HIX_XS_CONSOLE, hix_xs_console.dll beside the DLL, or a title EmbeddedXvd dump); this test needs it");
     unsafe {
         crate::tests::init_hix(sink as *const () as usize);
         let report = summary();

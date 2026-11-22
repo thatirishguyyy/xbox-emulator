@@ -3,7 +3,7 @@ name = "fwpuclnt"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console FWPUCLNT.DLL exports a PC FWPUCLNT lacks: FwpmBitmapIndexGet0/FwpmBitmapIndexFree0 with the console client validation and an in-process port of the console BFE.DLL bitmap-index allocator."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

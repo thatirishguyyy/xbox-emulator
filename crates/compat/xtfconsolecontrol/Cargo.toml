@@ -3,7 +3,7 @@ name = "xtfconsolecontrol"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console xtfconsolecontrol.dll (Xbox Tools Framework console-control server extension: config/settings tables, shutdown, running processes, system time, pending updates, screenshot markers, connected standby and stack dumps over the process-local console sandbox)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

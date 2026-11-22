@@ -6,11 +6,17 @@ pub mod monitor;
 pub mod debugclient;
 pub mod server;
 pub mod client;
+pub mod profile;
+pub mod imports;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod client_tests;
+#[cfg(test)]
+mod oracle_tests;
+#[cfg(test)]
+mod build_tests;
 
 use xtfmsg::com::metadata::OperationFn;
 use xtfmsg::com::Obj;
@@ -39,6 +45,7 @@ pub static SITE: EntrySite = EntrySite {
 
 #[no_mangle]
 pub unsafe extern "system" fn XtfOrdinal_4(extension: *const GUID, iid: *const GUID, ppv: *mut Obj) -> HRESULT {
+    imports::bind();
     extension_entry_point_with(&SITE, &DEBUG_MONITOR_EXTENSION_ID, extension, iid, ppv, &mut || {
         if monitor::instance().is_none() {
             log_site(&SITE, 129, "E_OUTOFMEMORY", E_OUTOFMEMORY, "");

@@ -31,6 +31,9 @@ const IID_FENCE: Guid = Guid(0x0a753dcf, 0xc4d8, 0x4b91, [0xad, 0xf6, 0xbe, 0x5a
 const IID_RESOURCE: Guid = Guid(0x696442be, 0xa72e, 0x4059, [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad]);
 const IID_FACTORY2: Guid = Guid(0x50c83a1c, 0xe072, 0x4c48, [0x87, 0xb0, 0x36, 0x30, 0xfa, 0x36, 0xa6, 0xd0]);
 const IID_SWAPCHAIN3: Guid = Guid(0x94d99bdb, 0xf1f8, 0x4ab0, [0xb2, 0x36, 0x7d, 0xa0, 0x17, 0x0e, 0xda, 0xb1]);
+const IID_FACTORY5: Guid = Guid(0x7632e1f5, 0xee65, 0x4dca, [0x87, 0xfd, 0x84, 0xcd, 0x75, 0xf8, 0x83, 0x8d]);
+const SWAP_CHAIN_FLAG_ALLOW_TEARING: u32 = 0x800;
+const PRESENT_ALLOW_TEARING: u32 = 0x200;
 
 extern "system" {
     fn LoadLibraryA(name: *const u8) -> *mut c_void;
@@ -227,10 +230,29 @@ struct State {
     height: u32,
     format: u32,
     frames: u64,
+    device: *mut c_void,
+    hwnd: usize,
+    sc_format: u32,
 }
 unsafe impl Send for State {}
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 static FAILED: AtomicBool = AtomicBool::new(false);
+static TEARING: AtomicBool = AtomicBool::new(false);
+
+fn present_flags() -> u32 {
+    if TEARING.load(Ordering::Relaxed) && crate::frame_fast::uncapped() { PRESENT_ALLOW_TEARING } else { 0 }
+}
+
+unsafe fn tearing_supported(factory: *mut c_void) -> bool {
+    let mut f5: *mut c_void = core::ptr::null_mut();
+    if vcall!(factory, 0, fn(*const Guid, *mut *mut c_void) -> i32, &IID_FACTORY5, &mut f5) < 0 || f5.is_null() {
+        return false;
+    }
+    let mut allow: i32 = 0;
+    let hr = vcall!(f5, 28, fn(u32, *mut c_void, u32) -> i32, 0, &mut allow as *mut i32 as *mut c_void, 4);
+    vcall!(f5, 2, fn() -> u32);
+    hr >= 0 && allow != 0
+}
 
 /// Flip-model swap chains accept only a few formats; map the title's back-buffer format.
 fn swapchain_format(fmt: u32) -> Option<u32> {
@@ -304,6 +326,11 @@ unsafe fn init(queue: *mut c_void, src: *mut c_void) -> Result<State, String> {
     scd[7] = 2; // BufferCount
     scd[8] = 0; // DXGI_SCALING_STRETCH
     scd[9] = 4; // DXGI_SWAP_EFFECT_FLIP_DISCARD
+    let tearing = tearing_supported(factory);
+    if tearing {
+        scd[11] = SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    }
+    TEARING.store(tearing, Ordering::Relaxed);
     let mut sc1: *mut c_void = core::ptr::null_mut();
     let hr = vcall!(factory, 15,
         fn(*mut c_void, usize, *const u32, *const c_void, *mut c_void, *mut *mut c_void) -> i32,
@@ -336,8 +363,9 @@ unsafe fn init(queue: *mut c_void, src: *mut c_void) -> Result<State, String> {
         return Err(format!("CreateFence hr={hr:#010x}"));
     }
     record("d3d12_xs", "PresentX", &format!(
-        "host swap chain created: {width}x{height} titleFmt={format} scFmt={sc_format} window {cw}x{ch} hwnd={hwnd:#x}"));
-    Ok(State { swapchain: sc3, alloc, list, fence, fence_value: 0, width, height, format, frames: 0 })
+        "host swap chain created: {width}x{height} titleFmt={format} scFmt={sc_format} window {cw}x{ch} hwnd={hwnd:#x}; present SyncInterval 0, tearing {}", if tearing { "allowed (no vsync wait while frame_hz is uncapped)" } else { "not supported by this display path, flips may still wait for DWM" }));
+    std::env::set_var("TOMBOX_PRESENT_TARGET", format!("{hwnd:x},{width},{height}"));
+    Ok(State { swapchain: sc3, alloc, list, fence, fence_value: 0, width, height, format, frames: 0, device, hwnd, sc_format })
 }
 
 fn barrier(res: *mut c_void, before: u32, after: u32) -> [u64; 4] {
@@ -382,10 +410,16 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
     const COMMON: u32 = 0; // == PRESENT
     const COPY_DEST: u32 = 0x400;
     const COPY_SOURCE: u32 = 0x800;
+    const RENDER_TARGET: u32 = 0x4;
     // Wait for the previous copy before reusing the allocator.
-    if !crate::present_wait::wait_fence(st.fence, st.fence_value, 5000) {
+    let wait_t0 = crate::frame::qpc();
+    let waited = crate::perf::timed(crate::perf::PWAIT, || crate::present_wait::wait_fence(st.fence, st.fence_value, 5000));
+    crate::frame_csv::add_wait(crate::frame::qpc() - wait_t0);
+    if !waited {
         return Err("timed out waiting for previous present copy".into());
     }
+    crate::present_probe::collect();
+    crate::overlay::tick(st.hwnd);
     let idx = vcall!(st.swapchain, 36, fn() -> u32);
     let mut dst: *mut c_void = core::ptr::null_mut();
     let hr = vcall!(st.swapchain, 9, fn(u32, *const Guid, *mut *mut c_void) -> i32, idx, &IID_RESOURCE, &mut dst);
@@ -394,13 +428,18 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
     }
     vcall!(st.alloc, 8, fn() -> i32); // allocator Reset
     vcall!(st.list, 10, fn(*mut c_void, *mut c_void) -> i32, st.alloc, core::ptr::null_mut());
+    crate::frame_csv::list_begin(st.device, st.list, st.frames + 1, ts_freq(queue));
     let pre = [barrier(src, COMMON, COPY_SOURCE), barrier(dst, COMMON, COPY_DEST)];
     vcall!(st.list, 26, fn(u32, *const [u64; 4]) -> (), 2, pre.as_ptr());
     vcall!(st.list, 17, fn(*mut c_void, *mut c_void) -> (), dst, src); // CopyResource
+    let dst_state = if crate::overlay::draw(st.device, queue, st.list, dst, st.sc_format, st.width, st.height) { RENDER_TARGET } else { COPY_DEST };
     let snap_frame = st.frames + 1;
     let snaps = if crate::present_snap::wanted(snap_frame) { snap_buffers(queue, st) } else { None };
+    if snaps.is_none() {
+        crate::present_probe::record_copy(queue, st.list, src, st.format, st.width as u32, st.height, snap_frame);
+    }
     let dst_after = if let Some((rb_src, rb_dst)) = snaps {
-        let mid = [barrier(dst, COPY_DEST, COPY_SOURCE)];
+        let mid = [barrier(dst, dst_state, COPY_SOURCE)];
         vcall!(st.list, 26, fn(u32, *const [u64; 4]) -> (), 1, mid.as_ptr());
         for (rb, tex) in [(rb_src, src), (rb_dst, dst)] {
             let d = crate::present_snap::footprint_location(rb, st.format, st.width as u32, st.height);
@@ -409,10 +448,11 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
         }
         COPY_SOURCE
     } else {
-        COPY_DEST
+        dst_state
     };
     let post = [barrier(src, COPY_SOURCE, COMMON), barrier(dst, dst_after, COMMON)];
     vcall!(st.list, 26, fn(u32, *const [u64; 4]) -> (), 2, post.as_ptr());
+    crate::frame_csv::list_end(st.list, st.frames + 1);
     let hr = vcall!(st.list, 9, fn() -> i32);
     if let Some((rb_src, rb_dst)) = snaps {
         if hr >= 0 {
@@ -440,7 +480,7 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
         if hr < 0 {
             return Err(format!("present list Close hr={hr:#010x}"));
         }
-        let hr = vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, 0);
+        let hr = vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, present_flags());
         if hr < 0 {
             return Err(format!("swapchain Present hr={hr:#010x}"));
         }
@@ -455,12 +495,30 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
     vcall!(queue, 10, fn(u32, *const *mut c_void) -> (), 1, lists.as_ptr());
     st.fence_value += 1;
     vcall!(queue, 14, fn(*mut c_void, u64) -> i32, st.fence, st.fence_value);
-    let hr = vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, 0);
+    let hr = crate::perf::timed(crate::perf::PFLIP, || vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, present_flags()));
     if hr < 0 {
         return Err(format!("swapchain Present hr={hr:#010x}"));
     }
     st.frames += 1;
     Ok(())
+}
+
+unsafe fn ts_freq(queue: *mut c_void) -> u64 {
+    static F: AtomicUsize = AtomicUsize::new(0);
+    let v = F.load(Ordering::Relaxed);
+    if v != 0 {
+        return v as u64;
+    }
+    let f = REAL_QVT[16].load(Ordering::Relaxed);
+    if f == 0 {
+        return 0;
+    }
+    let f: unsafe extern "system" fn(*mut c_void, *mut u64) -> i32 = core::mem::transmute(f);
+    let mut hz = 0u64;
+    if f(queue, &mut hz) >= 0 && hz != 0 {
+        F.store(hz as usize, Ordering::Relaxed);
+    }
+    hz
 }
 
 /// Xbox `PresentX` (queue slot 30).
@@ -473,6 +531,7 @@ unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes
         crate::frame::mark_flipped(core::ptr::read_unaligned(planes as *const u64));
     }
     if FAILED.load(Ordering::Relaxed) || plane_count == 0 || planes.is_null() {
+        crate::frame::on_present();
         return 0;
     }
     let res_count = core::ptr::read_unaligned(planes.add(8) as *const u32);
@@ -484,9 +543,12 @@ unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes
         return 0;
     }
     let src = *pp;
+    let entry = crate::frame::qpc();
     crate::perf::on_present();
+    crate::qwait::poll();
     crate::gpuprof::on_present();
     crate::hot_reload::on_present();
+    crate::present_probe::on_present(src, plane_count, planes);
     crate::slowcall::time("PresentX upload pump", || crate::perf::timed(crate::perf::UPLOAD, || crate::upload::pump(queue)));
     crate::slowcall::time("PresentX replay/rtcap", || crate::perf::timed(crate::perf::RTCAP, || {
         crate::replay::on_present(queue);
@@ -504,7 +566,9 @@ unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes
         }
     }
     let st = guard.as_mut().unwrap();
-    match crate::slowcall::time("PresentX host present", || crate::perf::timed(crate::perf::COPY, || present_frame(st, queue, src))) {
+    let presented = crate::slowcall::time("PresentX host present", || crate::perf::timed(crate::perf::COPY, || present_frame(st, queue, src)));
+    crate::frame::on_present();
+    match presented {
         Ok(()) => {
             crate::alias::tick();
             if st.frames == 2 || st.frames % 300 == 0 {
@@ -513,6 +577,9 @@ unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes
             if st.frames <= 3 || st.frames % 300 == 0 {
                 record("d3d12_xs", "PresentX", &format!(
                     "frame {} presented ({}x{} fmt={})", st.frames, st.width, st.height, st.format));
+            }
+            if crate::frame_csv::on() {
+                crate::frame_csv::present_done(st.frames, entry);
             }
         }
         Err(e) => {
@@ -662,17 +729,24 @@ unsafe extern "system" fn exec_lists_x(queue: *mut c_void, n: u32, lists: *const
     if lists.is_null() || n == 0 {
         return f(queue, n, lists);
     }
+    crate::qwait::poll();
+    let title: Vec<*mut c_void> = (0..n as usize).map(|i| *lists.add(i)).collect();
+    let before = crate::ecl_probe::removed_reason(queue);
     let real: Vec<*mut c_void> =
         (0..n as usize).map(|i| crate::cmdlist_wrap::unwrap(*lists.add(i))).collect();
     let mut real = crate::cl2_state::skip_presubmitted(crate::list_split::expand(&real));
     crate::indirect_bundle::resolve(&mut real);
-    let real = real;
+    let real = crate::ecl_probe::refuse_failed(real);
+    if real.is_empty() {
+        return;
+    }
     crate::sys_ts::note_queue(queue, REAL_QVT[16].load(Ordering::Relaxed), REAL_QVT[17].load(Ordering::Relaxed));
     let split = crate::cl2_state::before_execute(queue, &real);
     crate::title_heap::sync_for_execute(&real);
     crate::title_shadow::before_execute();
     crate::slowcall::time("queue ExecuteCommandLists replay hook", || crate::replay::on_execute(queue, &real));
     crate::slowcall::time("queue ExecuteCommandLists", || crate::gpu_wait::submit(queue, &real, f, REAL_QVT[14].load(Ordering::Relaxed), REAL_QVT[15].load(Ordering::Relaxed)));
+    crate::ecl_probe::check("ExecuteCommandLists", queue, REAL_QVT[18].load(Ordering::Relaxed), &title, &real, before);
     crate::title_shadow::after_execute(queue, REAL_QVT[14].load(Ordering::Relaxed), REAL_QVT[15].load(Ordering::Relaxed));
     crate::list_split::after_submit(queue, &real);
     crate::cl2_state::note_executed(queue, &real);

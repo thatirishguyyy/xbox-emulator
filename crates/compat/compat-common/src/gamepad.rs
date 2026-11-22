@@ -3,6 +3,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+mod host;
+pub mod mouse;
+
 extern "system" {
     fn GetModuleHandleW(n: *const u16) -> *mut u8;
     fn VirtualProtect(addr: *mut c_void, size: usize, new_protect: u32, old_protect: *mut u32) -> i32;
@@ -357,8 +360,36 @@ unsafe fn init_reading_vtbl() {
     vt[5] = rd_ts as usize;
     vt[6] = rd_device as usize;
     vt[7] = rd_raw as usize;
+    for (i, f) in RD_UNSERVED.iter().enumerate() {
+        if i >= 8 {
+            vt[i] = *f as usize;
+        }
+    }
     vt[22] = rd_gamepad as usize;
 }
+
+const RD_SLOT_NAMES: [&str; 32] = [
+    "QueryInterface", "AddRef", "Release", "GetInputKind", "GetSequenceNumber", "GetTimestamp", "GetDevice", "GetRawReport",
+    "GetControllerAxisCount", "GetControllerAxisState", "GetControllerButtonCount", "GetControllerButtonState",
+    "GetControllerSwitchCount", "GetControllerSwitchState", "GetKeyCount", "GetKeyState", "GetMouseState",
+    "GetTouchCount", "GetTouchState", "GetMotionState", "GetArcadeStickState", "GetFlightStickState",
+    "GetGamepadState", "GetRacingWheelState", "GetUiNavigationState", "slot25", "slot26", "slot27", "slot28", "slot29", "slot30", "slot31",
+];
+static RD_SLOT_SEEN: AtomicU32 = AtomicU32::new(0);
+
+fn rd_unserved(slot: usize) -> u64 {
+    let bit = 1u32 << slot;
+    if RD_SLOT_SEEN.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        log("virtual reading", &format!("title called slot {slot} {} on a virtual pad reading for the first time; the virtual pad only reports gamepad input, so it returns 0 (no data of that kind)", RD_SLOT_NAMES[slot]));
+    }
+    0
+}
+
+macro_rules! rd_slots {
+    ($($n:literal),*) => { [$({ unsafe extern "system" fn f(_this: *mut c_void) -> u64 { rd_unserved($n) } f as unsafe extern "system" fn(*mut c_void) -> u64 }),*] };
+}
+
+static RD_UNSERVED: [unsafe extern "system" fn(*mut c_void) -> u64; 32] = rd_slots!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
 
 fn is_reading(p: *mut c_void) -> bool {
     !p.is_null() && unsafe { *(p as *const *const usize) == core::ptr::addr_of!(READING_VTBL) as *const usize }
@@ -445,6 +476,7 @@ fn orig(i: usize) -> usize {
 type DeviceCb = unsafe extern "system" fn(u64, *mut c_void, *mut c_void, u64, u32, u32);
 
 unsafe extern "system" fn gi_current(this: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
+    host::count(4);
     if out.is_null() {
         return 0x8000_4003u32 as i32;
     }
@@ -463,6 +495,8 @@ unsafe extern "system" fn gi_current(this: *mut c_void, kind: u32, device: *mut 
     }
     let f: unsafe extern "system" fn(*mut c_void, u32, *mut c_void, *mut *mut c_void) -> i32 = core::mem::transmute(orig(4));
     let hr = f(this, kind, device, out);
+    host::note_reading(hr, out);
+    let hr = host::drop_host_pad(hr, out);
     if hr < 0 && device.is_null() && kind & KIND_GAMEPAD != 0 && kind & 0x130 == 0 && CONNECTED.load(Ordering::SeqCst) {
         *out = new_reading();
         log_limited("GetCurrentReading", &format!("virtual pad reading for any-device query (kind={kind:#x})"));
@@ -472,6 +506,7 @@ unsafe extern "system" fn gi_current(this: *mut c_void, kind: u32, device: *mut 
 }
 
 unsafe extern "system" fn gi_next(this: *mut c_void, reference: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
+    host::count(5);
     if device == vdev() || is_reading(reference) {
         if !out.is_null() {
             *out = core::ptr::null_mut();
@@ -479,10 +514,11 @@ unsafe extern "system" fn gi_next(this: *mut c_void, reference: *mut c_void, kin
         return READING_NOT_FOUND;
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, *mut c_void, *mut *mut c_void) -> i32 = core::mem::transmute(orig(5));
-    f(this, reference, kind, device, out)
+    host::drop_host_pad(f(this, reference, kind, device, out), out)
 }
 
 unsafe extern "system" fn gi_prev(this: *mut c_void, reference: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
+    host::count(6);
     if device == vdev() || is_reading(reference) {
         if !out.is_null() {
             *out = core::ptr::null_mut();
@@ -490,10 +526,11 @@ unsafe extern "system" fn gi_prev(this: *mut c_void, reference: *mut c_void, kin
         return READING_NOT_FOUND;
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, *mut c_void, *mut *mut c_void) -> i32 = core::mem::transmute(orig(6));
-    f(this, reference, kind, device, out)
+    host::drop_host_pad(f(this, reference, kind, device, out), out)
 }
 
 unsafe extern "system" fn gi_temporal(this: *mut c_void, ts: u64, device: *mut c_void, out: *mut *mut c_void) -> i32 {
+    host::count(7);
     if device == vdev() {
         if out.is_null() {
             return 0x8000_4003u32 as i32;
@@ -502,19 +539,22 @@ unsafe extern "system" fn gi_temporal(this: *mut c_void, ts: u64, device: *mut c
         return S_OK;
     }
     let f: unsafe extern "system" fn(*mut c_void, u64, *mut c_void, *mut *mut c_void) -> i32 = core::mem::transmute(orig(7));
-    f(this, ts, device, out)
+    host::drop_host_pad(f(this, ts, device, out), out)
 }
 
 unsafe extern "system" fn gi_reading_cb(this: *mut c_void, device: *mut c_void, kind: u32, threshold: f32, ctx: *mut c_void, cb: usize, token: *mut u64) -> i32 {
+    host::count(8);
     if device == vdev() {
         log("RegisterReadingCallback", "virtual pad: not supported, title must poll");
         return E_NOTIMPL;
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, f32, *mut c_void, usize, *mut u64) -> i32 = core::mem::transmute(orig(8));
-    f(this, device, kind, threshold, ctx, cb, token)
+    let (hctx, hcb) = host::wrap_reading_callback(ctx, cb);
+    f(this, device, kind, threshold, hctx, hcb, token)
 }
 
 unsafe extern "system" fn gi_device_cb(this: *mut c_void, device: *mut c_void, kind: u32, filter: u32, enumk: u32, ctx: *mut c_void, cb: usize, token: *mut u64) -> i32 {
+    host::count(9);
     let hr = if device == vdev() {
         if !token.is_null() {
             *token = 0;
@@ -522,7 +562,8 @@ unsafe extern "system" fn gi_device_cb(this: *mut c_void, device: *mut c_void, k
         S_OK
     } else {
         let f: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u32, u32, *mut c_void, usize, *mut u64) -> i32 = core::mem::transmute(orig(9));
-        f(this, device, kind, filter, enumk, ctx, cb, token)
+        let (hctx, hcb) = host::wrap_device_callback(ctx, cb);
+        f(this, device, kind, filter, enumk, hctx, hcb, token)
     };
     let wants = (device.is_null() || device == vdev()) && kind & KIND_GAMEPAD != 0 && filter & STATUS_CONNECTED != 0 && cb != 0;
     if hr < 0 || !wants {
@@ -542,6 +583,7 @@ unsafe extern "system" fn gi_device_cb(this: *mut c_void, device: *mut c_void, k
 }
 
 unsafe extern "system" fn gi_stop(this: *mut c_void, token: u64) {
+    host::count(12);
     if regs_remove(&mut REGS.lock().unwrap_or_else(|e| e.into_inner()), token) {
         log("StopCallback", &format!("token={token:#x} gamepad listener removed"));
     }
@@ -550,6 +592,7 @@ unsafe extern "system" fn gi_stop(this: *mut c_void, token: u64) {
 }
 
 unsafe extern "system" fn gi_unregister(this: *mut c_void, token: u64, timeout: u64) -> u32 {
+    host::count(13);
     if regs_remove(&mut REGS.lock().unwrap_or_else(|e| e.into_inner()), token) {
         log("UnregisterCallback", &format!("token={token:#x} gamepad listener removed"));
     }
@@ -558,6 +601,7 @@ unsafe extern "system" fn gi_unregister(this: *mut c_void, token: u64, timeout: 
 }
 
 unsafe extern "system" fn gi_find_id(this: *mut c_void, id: *const [u8; 32], out: *mut *mut c_void) -> i32 {
+    host::count(16);
     if !id.is_null() && !out.is_null() && *id == DEVICE_ID {
         *out = vdev();
         return S_OK;
@@ -567,6 +611,7 @@ unsafe extern "system" fn gi_find_id(this: *mut c_void, id: *const [u8; 32], out
 }
 
 unsafe extern "system" fn gi_find_obj(this: *mut c_void, obj: *mut c_void, out: *mut *mut c_void) -> i32 {
+    host::count(17);
     if obj == vdev() && !out.is_null() {
         *out = vdev();
         return S_OK;
@@ -620,6 +665,7 @@ unsafe fn patch_object(obj: *mut c_void) {
 unsafe extern "system" fn create_hook(out: *mut *mut c_void) -> i32 {
     let f: unsafe extern "system" fn(*mut *mut c_void) -> i32 = core::mem::transmute(ORIG_CREATE.load(Ordering::SeqCst));
     let hr = f(out);
+    log("GameInputCreate", &format!("real GameInputCreate in {} hr={hr:#x}", host::module_of(ORIG_CREATE.load(Ordering::SeqCst))));
     if hr >= 0 && !out.is_null() && !(*out).is_null() {
         patch_object(*out);
         start_channel();

@@ -28,8 +28,15 @@ pub struct OpnumPolicy {
     pub flags: u8,
 }
 
-pub const LSARPC_POLICY_7E: OpnumPolicy = OpnumPolicy { protseq_mask: 8, flags: 3 };
-pub const LSARPC_POLICY_7F: OpnumPolicy = OpnumPolicy { protseq_mask: 8, flags: 3 };
+const fn p(protseq_mask: u32, flags: u8) -> OpnumPolicy {
+    OpnumPolicy { protseq_mask, flags }
+}
+
+pub const LSARPC_OPNUM_LIMIT: u16 = 0x86;
+pub const LSARPC_POLICY_RVA: u32 = 0x1654c0;
+pub const LSARPC_POLICY: [OpnumPolicy; LSARPC_OPNUM_LIMIT as usize] = [p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 0), p(12, 2), p(12, 0), p(12, 2), p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 2), p(12, 2), p(12, 0), p(12, 2), p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 2), p(12, 2), p(12, 6), p(12, 6), p(12, 0), p(12, 0), p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 2), p(12, 2), p(12, 0), p(12, 2), p(12, 2), p(12, 6), p(12, 6), p(12, 0), p(12, 0), p(12, 0), p(12, 2), p(12, 0), p(12, 2), p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 2), p(12, 0), p(12, 2), p(12, 0), p(12, 0), p(12, 2), p(8, 11), p(8, 11), p(8, 11), p(8, 11), p(8, 11), p(8, 11), p(8, 3), p(8, 3), p(12, 0), p(8, 11), p(8, 3), p(8, 3), p(8, 3), p(12, 0), p(12, 2), p(8, 3), p(2, 0), p(2, 0), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 11), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 7), p(8, 7), p(8, 7), p(8, 7), p(8, 7), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(8, 3), p(12, 2), p(12, 0), p(8, 3), p(12, 2), p(12, 2)];
+pub const LSARPC_POLICY_7E: OpnumPolicy = LSARPC_POLICY[OPNUM_ENABLE as usize];
+pub const LSARPC_POLICY_7F: OpnumPolicy = LSARPC_POLICY[OPNUM_DISABLE as usize];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CallAttributes {
@@ -70,21 +77,109 @@ impl TitleToken {
         }
     }
 
+    pub fn caller() -> TitleToken {
+        unsafe { caller_token() }
+    }
+
     pub fn check_membership(&self, sid: &str) -> bool {
         !self.is_app_container && (self.user == sid || self.groups.iter().any(|g| g == sid))
     }
 }
 
 pub fn opnum_policy(opnum: u16) -> Option<OpnumPolicy> {
-    match opnum {
-        OPNUM_ENABLE => Some(LSARPC_POLICY_7E),
-        OPNUM_DISABLE => Some(LSARPC_POLICY_7F),
-        _ => None,
+    LSARPC_POLICY.get(opnum as usize).copied()
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn OpenThreadToken(thread: isize, access: u32, as_self: i32, token: *mut isize) -> i32;
+    fn OpenProcessToken(process: isize, access: u32, token: *mut isize) -> i32;
+    fn GetTokenInformation(token: isize, class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> i32;
+    fn ConvertSidToStringSidW(sid: *const u8, out: *mut *mut u16) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentThread() -> isize;
+    fn GetCurrentProcess() -> isize;
+    fn CloseHandle(h: isize) -> i32;
+    fn LocalFree(p: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    fn GetLastError() -> u32;
+}
+
+const TOKEN_QUERY: u32 = 8;
+const TOKEN_USER: u32 = 1;
+const TOKEN_GROUPS: u32 = 2;
+const TOKEN_IS_APP_CONTAINER: u32 = 29;
+const SE_GROUP_ENABLED: u32 = 4;
+const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x10;
+
+unsafe fn sid_text(sid: *const u8) -> Option<String> {
+    let mut s: *mut u16 = core::ptr::null_mut();
+    if sid.is_null() || ConvertSidToStringSidW(sid, &mut s) == 0 {
+        return None;
     }
+    let mut n = 0;
+    while *s.add(n) != 0 {
+        n += 1;
+    }
+    let out = String::from_utf16_lossy(core::slice::from_raw_parts(s, n));
+    LocalFree(s as *mut _);
+    Some(out)
+}
+
+unsafe fn token_info(token: isize, class: u32) -> Result<Vec<u64>, u32> {
+    let mut need = 0u32;
+    GetTokenInformation(token, class, core::ptr::null_mut(), 0, &mut need);
+    let mut buf = vec![0u64; (need as usize).div_ceil(8).max(1)];
+    if GetTokenInformation(token, class, buf.as_mut_ptr() as *mut u8, (buf.len() * 8) as u32, &mut need) == 0 {
+        return Err(GetLastError());
+    }
+    Ok(buf)
+}
+
+pub unsafe fn token_of(token: isize) -> TitleToken {
+    let denied = TitleToken { user: String::new(), groups: Vec::new(), is_app_container: false, membership_error: ERROR_ACCESS_DENIED };
+    let user = match token_info(token, TOKEN_USER) {
+        Ok(b) => match sid_text(b[0] as *const u8) {
+            Some(s) => s,
+            None => return denied,
+        },
+        Err(e) => return TitleToken { membership_error: e, ..denied },
+    };
+    let groups = match token_info(token, TOKEN_GROUPS) {
+        Ok(b) => {
+            let base = b.as_ptr() as *const u8;
+            let count = (base as *const u32).read_unaligned() as usize;
+            (0..count)
+                .filter_map(|i| {
+                    let e = base.add(8 + i * 16);
+                    let attrs = (e.add(8) as *const u32).read_unaligned();
+                    (attrs & SE_GROUP_ENABLED != 0 && attrs & SE_GROUP_USE_FOR_DENY_ONLY == 0).then(|| sid_text((e as *const usize).read_unaligned() as *const u8)).flatten()
+                })
+                .collect()
+        }
+        Err(e) => return TitleToken { user, membership_error: e, ..denied },
+    };
+    let is_app_container = match token_info(token, TOKEN_IS_APP_CONTAINER) {
+        Ok(b) => b[0] as u32 != 0,
+        Err(_) => return TitleToken { user, groups, ..denied },
+    };
+    TitleToken { user, groups, is_app_container, membership_error: 0 }
+}
+
+pub unsafe fn caller_token() -> TitleToken {
+    let mut t = 0isize;
+    if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut t) == 0 && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut t) == 0 {
+        return TitleToken { user: String::new(), groups: Vec::new(), is_app_container: false, membership_error: ERROR_ACCESS_DENIED };
+    }
+    let out = token_of(t);
+    CloseHandle(t);
+    out
 }
 
 pub fn security_callback(call: &CallAttributes, policy: Option<OpnumPolicy>, token: &TitleToken) -> u32 {
-    if call.opnum >= 0x81 {
+    if call.opnum >= LSARPC_OPNUM_LIMIT {
         return RPC_S_PROCNUM_OUT_OF_RANGE;
     }
     let p = policy.unwrap_or(OpnumPolicy { protseq_mask: 0, flags: 4 });
@@ -260,10 +355,10 @@ pub fn lsarpc_call(h: &Hklm, opnum: u16, call: &CallAttributes, token: &TitleTok
 
 #[no_mangle]
 pub unsafe extern "system" fn LsaEnablePasswordLessCurrentUser() -> NtStatus {
-    lsarpc_call(&Hklm::open(), OPNUM_ENABLE, &CallAttributes::console_client(OPNUM_ENABLE), &TitleToken::console_title())
+    lsarpc_call(&Hklm::open(), OPNUM_ENABLE, &CallAttributes::console_client(OPNUM_ENABLE), &TitleToken::caller())
 }
 
 #[no_mangle]
 pub unsafe extern "system" fn LsaDisablePasswordLessCurrentUser() -> NtStatus {
-    lsarpc_call(&Hklm::open(), OPNUM_DISABLE, &CallAttributes::console_client(OPNUM_DISABLE), &TitleToken::console_title())
+    lsarpc_call(&Hklm::open(), OPNUM_DISABLE, &CallAttributes::console_client(OPNUM_DISABLE), &TitleToken::caller())
 }

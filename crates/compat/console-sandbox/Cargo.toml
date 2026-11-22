@@ -3,7 +3,7 @@ name = "console-sandbox"
 version = "0.1.0"
 edition = "2021"
 description = "Sandboxed console OS state for running console service code in-process: emulated registry and hostname, a console filesystem under the emulator data dir, and an in-process service host. Never reads or writes the PC's registry, hostname, files or services."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "console_sandbox"

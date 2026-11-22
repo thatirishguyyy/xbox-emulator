@@ -82,6 +82,9 @@ fn main() {
     dirs.sort();
     for d in &dirs {
         let toml = d.join("Cargo.toml");
+        if !toml.is_file() {
+            continue;
+        }
         println!("cargo:rerun-if-changed={}", toml.display());
         if let Some((n, c)) = std::fs::read_to_string(&toml).ok().as_deref().and_then(lib_name) {
             libs.push((d.clone(), n, c));

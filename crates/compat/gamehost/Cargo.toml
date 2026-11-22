@@ -3,7 +3,7 @@ name = "gamehost"
 version = "0.1.0"
 edition = "2021"
 description = "In-process console GameHostService: the host side of the GameCore MessageQueue that WerXboxGc.dll and xgameruntime.dll talk to (crash dump info 0xc8, crash dump progress 0xca, controller notify 0xc9, package mount 0x12c / unmount 0x12d), decoded from gamehostservice.exe 22000/22621."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "gamehost"

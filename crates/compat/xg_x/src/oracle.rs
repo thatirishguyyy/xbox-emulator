@@ -21,16 +21,13 @@ pub struct Oracle(pub *mut c_void, #[allow(dead_code)] MutexGuard<'static, ()>);
 pub fn oracle() -> Option<Oracle> {
     let guard = serial();
     let xmem = r"D:\xbox-pc-port\emulator\target\release\xmem.dll";
-    let dll = xone_exports::reference_dlls("xg_x.dll").into_iter().next()?;
-    if !std::path::Path::new(xmem).is_file() {
-        return None;
-    }
+    let dll = xone_exports::reference_dlls("xg_x.dll").into_iter().next().expect("no console xg_x.dll in the game dumps; the console oracle tests need one");
+    assert!(std::path::Path::new(xmem).is_file(), "{xmem} missing; the console oracle tests need it");
     unsafe {
-        if LoadLibraryW(wide(xmem).as_ptr()).is_null() {
-            return None;
-        }
+        assert!(!LoadLibraryW(wide(xmem).as_ptr()).is_null(), "LoadLibrary failed for {xmem}");
         let h = LoadLibraryW(wide(&dll.to_string_lossy()).as_ptr());
-        (!h.is_null()).then_some(Oracle(h, guard))
+        assert!(!h.is_null(), "LoadLibrary failed for {}", dll.display());
+        Some(Oracle(h, guard))
     }
 }
 

@@ -110,6 +110,7 @@ unsafe extern "system" fn close_x(this: *mut c_void) -> i32 {
     crate::gds::on_close(this);
     crate::centroid_bind::on_close(this);
     let hr = f(this);
+    crate::ecl_probe::on_close(this, hr);
     crate::gpu_wait::on_close(this);
     if hr < 0 {
         static N: AtomicUsize = AtomicUsize::new(0);

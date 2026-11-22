@@ -3,7 +3,7 @@ name = "xmem"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for Xbox xmem.dll — heap/virtual memory, backed by the real Windows heap."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xmem"

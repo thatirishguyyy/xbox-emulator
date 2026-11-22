@@ -3,7 +3,7 @@ name = "xgs12"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox One (D3D12.X) release graphics user-mode driver xgs12.dll, mapped onto the emulator d3d12_xs layer."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xgs12"

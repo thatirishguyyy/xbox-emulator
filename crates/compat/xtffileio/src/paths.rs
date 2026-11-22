@@ -101,13 +101,30 @@ pub fn host_path(console_full: &str) -> Result<HostPath, u32> {
     if !drive.is_dir() {
         return Err(ERROR_PATH_NOT_FOUND);
     }
-    let (_, host) = console_sandbox::fs::resolve(console_full).ok_or(ERROR_PATH_NOT_FOUND)?;
+    let (_, host) = console_sandbox::fs::try_resolve(console_full).map_err(console_sandbox::fs::win32_error)?;
     let mut s = host.to_string_lossy().to_string();
     if console_full.ends_with('\\') && !s.ends_with('\\') {
         s.push('\\');
     }
     let ext = if s.starts_with("\\\\") { format!("\\\\?\\UNC\\{}", &s[2..]) } else { format!("\\\\?\\{s}") };
     Ok(HostPath { wide: wide(&ext), path: host })
+}
+
+pub fn host_search_path(console_full: &str) -> Result<HostPath, u32> {
+    let Some(cut) = console_full.rfind('\\') else { return host_path(console_full) };
+    let pattern = &console_full[cut + 1..];
+    if !pattern.contains(['*', '?', '<', '>', '"']) {
+        return host_path(console_full);
+    }
+    if pattern.contains(':') || pattern.chars().any(|c| (c as u32) < 32 || c == '|' || c == '/') {
+        return Err(console_sandbox::fs::ERROR_INVALID_NAME);
+    }
+    let dir = host_path(&console_full[..cut + 1])?;
+    let mut s = dir.path.to_string_lossy().trim_end_matches('\\').to_string();
+    s.push('\\');
+    s.push_str(pattern);
+    let ext = if s.starts_with("\\\\") { format!("\\\\?\\UNC\\{}", &s[2..]) } else { format!("\\\\?\\{s}") };
+    Ok(HostPath { wide: wide(&ext), path: PathBuf::from(s) })
 }
 
 pub fn console_path_of_host(host: &std::path::Path) -> Option<String> {

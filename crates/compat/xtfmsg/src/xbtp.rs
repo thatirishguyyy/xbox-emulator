@@ -26,7 +26,22 @@ pub fn preload(path: &std::path::Path) -> bool {
     unsafe { !LoadLibraryW(w.as_ptr()).is_null() }
 }
 
+pub type StaticImports = fn(&[u8]) -> Option<usize>;
+
+static STATIC_IMPORTS: OnceLock<StaticImports> = OnceLock::new();
+
+pub fn bind_static_imports(table: StaticImports) -> bool {
+    *STATIC_IMPORTS.get_or_init(|| table) as usize == table as usize
+}
+
+pub fn static_import(name: &[u8]) -> Option<usize> {
+    STATIC_IMPORTS.get().and_then(|t| t(name))
+}
+
 pub fn proc(name: &[u8]) -> Result<usize, HRESULT> {
+    if let Some(p) = static_import(name) {
+        return Ok(p);
+    }
     let m = module();
     if m == 0 {
         return Err(hr_last_error_or_fail());

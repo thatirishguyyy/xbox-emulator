@@ -736,11 +736,11 @@ mod tests {
         }
         let one = |d: &[u8]| alloc_info_with(d, 1, |d| texture_part(xg_texture_alloc(d, Family::XboxOne), || (1, 1)));
         assert_eq!(one(&tdesc(2048, 2048, 2, 56, 1, 0)), (0x100_0000, 0x100));
-        assert_eq!(one(&tdesc(1920, 1080, 1, 19, 2, 2)), (0x1fe_0000, 0x8000));
-        assert_eq!(one(&tdesc(1920, 1080, 1, 61, 2, 1)), (0x3f_c000, 0x4000));
+        assert_eq!(one(&tdesc(1920, 1080, 1, 19, 2, 2)), (0xff_0000 + 0x3f_c000, 0x2000));
+        assert_eq!(one(&tdesc(1920, 1080, 1, 61, 2, 1)), (0x3f_c000, 0x2000));
         let mut two = tdesc(1920, 1080, 1, 61, 2, 1);
         two.extend(rdesc(1, 0, 100));
-        assert_eq!(alloc_info_with(&two, 2, |d| xg_texture_alloc(d, Family::XboxOne).ok()), (0x3f_c000 + 100, 0x4000));
+        assert_eq!(alloc_info_with(&two, 2, |d| xg_texture_alloc(d, Family::XboxOne).ok()), (0x3f_c000 + 100, 0x2000));
     }
 
     #[test]

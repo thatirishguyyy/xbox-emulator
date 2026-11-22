@@ -644,7 +644,7 @@ impl FileReader {
         S_OK
     }
 
-    unsafe fn chunk_json(&self, first: bool, offset: u64, msg: *mut c_void) -> HRESULT {
+    pub unsafe fn chunk_json(&self, first: bool, offset: u64, msg: *mut c_void) -> HRESULT {
         let mut props = Com::null();
         let hr = XbtpCreateJsonObject(props.out());
         if hr < 0 {

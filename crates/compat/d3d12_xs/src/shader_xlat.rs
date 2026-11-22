@@ -39,7 +39,7 @@ pub fn origin(code: usize) -> Option<(u64, Arc<Vec<u8>>)> {
     ORIGIN.get()?.lock().unwrap().get(&code).cloned()
 }
 
-fn fnv1a(b: &[u8]) -> u64 {
+pub(crate) fn fnv1a(b: &[u8]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for &x in b {
         h ^= x as u64;
@@ -180,6 +180,16 @@ fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], edit: Option
         dump_failure(hash, blob, None, &e);
         format!("translate: {e}")
     })?;
+    if crate::cbv_raw::enabled() {
+        if !tombox_xshader::gcn::is_durango(&ex.fssm) {
+            dump_failure(hash, blob, None, "Xbox One title shader is not a Durango program");
+            return Err("bind: Xbox One title shader is not a Durango program; its constant buffers cannot follow the raw-SRV binding".into());
+        }
+        t.hlsl = crate::cbv_raw::rewrite_hlsl(&t.hlsl).map_err(|e| {
+            dump_failure(hash, blob, None, &e);
+            format!("bind: {e}")
+        })?;
+    }
     let needs = crate::mip_bind::Needs::of(&t);
     crate::mip_bind::note(hash, &needs);
     if let Some(why) = needs.refusal() {
@@ -362,9 +372,9 @@ fn fma_mode() -> tombox_xshader::shader_cache::Fma {
         let t0 = std::time::Instant::now();
         let p = tombox_xshader::fma_probe::probe();
         record("d3d12_xs", "shader_xlat", &format!(
-            "fma probe ({}, {:.0} ms, {}): fast hardware fma for denorm-preserve shaders {}, for denorm-any shaders {} [{}]; cache {}",
+            "fma probe ({}, {:.0} ms, {}): fast hardware fma for denorm-preserve shaders {}, for denorm-any shaders {}, hybrid fma for denorm-any shaders {}, native f16 rounding {} [{}]; cache {}",
             p.adapter, t0.elapsed().as_secs_f64() * 1000.0, if p.cached { "cached result" } else { "measured" },
-            if p.fma.preserve { "ON" } else { "off (exact f64 path)" }, if p.fma.any { "ON" } else { "off (exact f64 path)" }, p.detail,
+            if p.fma.preserve { "ON" } else { "off (exact f64 path)" }, if p.fma.any { "ON" } else { "off (exact f64 path)" }, if p.fma.hybrid { "ON" } else { "off" }, if p.fma.f2h { "ON" } else { "off (software rounding)" }, p.detail,
             tombox_xshader::shader_cache::pack_path().display()));
         p.fma
     })
@@ -593,6 +603,7 @@ pub unsafe fn translate_for_targets(ptr: *const u8, len: usize, rtfmt: [u8; 8]) 
     start_prewarm();
     let blob = core::slice::from_raw_parts(ptr, len);
     let hash = fnv1a(blob);
+    crate::shader_dump::note(blob, hash, &rtfmt, None);
     let fmt_key = rtfmt.iter().any(|&k| k != 0);
     let key = cache_key(hash, &rtfmt);
     let c = cell(key);
@@ -628,6 +639,7 @@ pub fn needs_external_root_data(blob: &[u8]) -> bool {
 
 pub fn translate_mesh_with_root(blob: &[u8], root: &[u8]) -> Cached {
     let hash = fnv1a(blob);
+    crate::shader_dump::note(blob, hash, &[0; 8], Some(root));
     let entry = mesh_root_cell(hash, root);
     entry.get_or_init(|| {
         crate::perf::timed(crate::perf::SHADER, || {

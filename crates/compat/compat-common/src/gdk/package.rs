@@ -492,7 +492,7 @@ unsafe extern "system" fn estimate_download_size(_t: This, id: *const u8, _n: u3
     S_OK
 }
 
-fn mount_path() -> String {
+pub fn mount_path() -> String {
     let d = title().dir.clone().or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(|x| x.to_path_buf()))).unwrap_or_default();
     d.to_string_lossy().into_owned()
 }
@@ -573,7 +573,7 @@ pub fn parse_features(text: &str) -> Vec<Feature> {
     v
 }
 
-fn features() -> &'static Vec<Feature> {
+pub fn features() -> &'static Vec<Feature> {
     static F: OnceLock<Vec<Feature>> = OnceLock::new();
     F.get_or_init(|| {
         let Some(dir) = title().dir.as_deref() else { return Vec::new() };

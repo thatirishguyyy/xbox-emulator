@@ -13,8 +13,6 @@ pub const CP_ACP: u32 = 0;
 pub const PROC_THREAD_ATTRIBUTE_JOB_LIST: usize = 0x2000d;
 pub const JOB_OBJECT_ALL_ACCESS: u32 = 0x1f003f;
 pub const TOKEN_ALL_ACCESS: u32 = 0xf01ff;
-pub const SECURITY_IMPERSONATION: u32 = 2;
-pub const TOKEN_PRIMARY: u32 = 1;
 pub const CREATE_SUSPENDED: u32 = 4;
 pub const CREATE_NEW_CONSOLE: u32 = 0x10;
 pub const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
@@ -23,7 +21,6 @@ pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x100_0000;
 pub const CREATE_NO_WINDOW: u32 = 0x800_0000;
 pub const CONSOLE_CREATION_FLAGS: u32 = 0x108_0414;
 pub const ERROR_FILE_NOT_FOUND: u32 = 2;
-pub const ERROR_NOT_SUPPORTED: u32 = 50;
 pub const ERROR_DIRECTORY: u32 = 267;
 pub const DUPLICATE_SAME_ACCESS: u32 = 2;
 
@@ -97,7 +94,6 @@ extern "system" {
     pub fn InitializeProcThreadAttributeList(list: *mut c_void, count: u32, flags: u32, size: *mut usize) -> BOOL;
     pub fn UpdateProcThreadAttribute(list: *mut c_void, flags: u32, attribute: usize, value: *const c_void, size: usize, previous: *mut c_void, ret: *mut usize) -> BOOL;
     pub fn DeleteProcThreadAttributeList(list: *mut c_void);
-    pub fn CreateProcessW(app: *const u16, cmd: *mut u16, psa: *const c_void, tsa: *const c_void, inherit: BOOL, flags: u32, env: *const c_void, cwd: *const u16, si: *const StartupInfoExW, pi: *mut ProcessInformation) -> BOOL;
     pub fn GetProcessAffinityMask(h: HANDLE, process: *mut usize, system: *mut usize) -> BOOL;
     pub fn SetProcessAffinityMask(h: HANDLE, mask: usize) -> BOOL;
     pub fn ResumeThread(h: HANDLE) -> u32;
@@ -113,7 +109,8 @@ extern "system" {
 #[link(name = "advapi32")]
 extern "system" {
     pub fn OpenProcessToken(process: HANDLE, access: u32, token: *mut HANDLE) -> BOOL;
-    pub fn DuplicateTokenEx(token: HANDLE, access: u32, sa: *const c_void, level: u32, kind: u32, out: *mut HANDLE) -> BOOL;
+    pub fn CreateRestrictedToken(token: HANDLE, flags: u32, disable_count: u32, disable: *const c_void, delete_count: u32, delete: *const c_void, restrict_count: u32, restrict: *const c_void, out: *mut HANDLE) -> BOOL;
+    pub fn CreateProcessAsUserW(token: HANDLE, app: *const u16, cmd: *mut u16, psa: *const c_void, tsa: *const c_void, inherit: BOOL, flags: u32, env: *const c_void, cwd: *const u16, si: *const StartupInfoExW, pi: *mut ProcessInformation) -> BOOL;
 }
 
 pub fn hr_from_wait(code: u32) -> HRESULT {

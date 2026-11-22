@@ -1,5 +1,6 @@
 use crate::console::*;
 use crate::launch::remote_run_create_process;
+use crate::variant::ConsoleCopy;
 use crate::win::*;
 use core::ptr::null_mut;
 use xtfmsg::chk::Activity;
@@ -17,10 +18,16 @@ pub const RUN_FLAG_REDIRECT_MASK: u32 = 0xC000_0000;
 struct Op {
     ctx: ErrorContext,
     hr: HRESULT,
+    copy: ConsoleCopy,
 }
 
 impl Op {
-    unsafe fn fail(&mut self, hr: HRESULT, line: u32, expr: &str) {
+    fn l(&self, line_22000: u32) -> u32 {
+        self.copy.run_handler_line(line_22000)
+    }
+
+    unsafe fn fail(&mut self, hr: HRESULT, line_22000: u32, expr: &str) {
+        let line = self.l(line_22000);
         self.ctx.append_error(hr, RUN_CPP, line as i32);
         self.hr = hr;
         ck("RunHandler", line, expr, hr, "");
@@ -54,12 +61,15 @@ unsafe fn create_pipe(sa: &SecurityAttributes, read: &mut OwnedHandle, write: &m
 }
 
 pub unsafe extern "system" fn run_handler(session: usize, received: usize, reply: usize) -> HRESULT {
-    let activity = Activity::start(b"XtfRemoteRun: RunHandler\0");
-    let mut op = Op { ctx: ErrorContext::new(reply as Obj), hr: S_OK };
+    let copy = crate::variant::current();
+    let activity = copy.has_run_handler_activity().then(|| Activity::start(b"XtfRemoteRun: RunHandler\0"));
+    let mut op = Op { ctx: ErrorContext::new(reply as Obj), hr: S_OK, copy };
     run(&mut op, session as Obj, received as Obj, reply as Obj);
     op.ctx.hr = op.hr;
     drop(op);
-    activity.stop();
+    if let Some(a) = activity {
+        a.stop();
+    }
     S_OK
 }
 
@@ -159,8 +169,8 @@ unsafe fn run_inner(op: &mut Op, session: Obj, received: Obj, reply: Obj, req: &
         }
     }
     let mut pi = ProcessInformation::zeroed();
-    let hr = remote_run_create_process(*command, *directory, flags, &mut si, &mut pi);
-    ck("RunHandler", 984, "RemoteRunCreateProcess(pwszCommandLine, pwszWorkingDirectory, dwFlags, &StartupInfo, &ProcessInfo)", hr, "");
+    let hr = remote_run_create_process(op.copy, *command, *directory, flags, &mut si, &mut pi);
+    ck("RunHandler", op.l(984), "RemoteRunCreateProcess(pwszCommandLine, pwszWorkingDirectory, dwFlags, &StartupInfo, &ProcessInfo)", hr, "");
     op.hr = hr;
     if hr < 0 {
         return;
@@ -219,7 +229,7 @@ unsafe fn run_inner(op: &mut Op, session: Obj, received: Obj, reply: Obj, req: &
             } else {
                 let hr = if hr < 0 { hr } else { E_FAIL };
                 op.hr = hr;
-                ck("RunHandler", 1027, "XtfWaitForSingleObject", hr, "");
+                ck("RunHandler", op.l(1027), "XtfWaitForSingleObject", hr, "");
                 return;
             };
             if poll {
@@ -230,9 +240,9 @@ unsafe fn run_inner(op: &mut Op, session: Obj, received: Obj, reply: Obj, req: &
                         break;
                     }
                     if hr < 0 {
-                        op.ctx.append_error(hr, RUN_CPP, 1068);
+                        op.ctx.append_error(hr, RUN_CPP, op.l(1068) as i32);
                         op.hr = hr;
-                        ck("RunHandler", 1068, "hr", hr, "");
+                        ck("RunHandler", op.l(1068), "hr", hr, "");
                         return;
                     }
                     let mut body = Com::null();
@@ -249,7 +259,7 @@ unsafe fn run_inner(op: &mut Op, session: Obj, received: Obj, reply: Obj, req: &
                     if msg_id == MSGID_RUN_INPUT {
                         if flags & RUN_FLAG_REDIRECT_INPUT != 0 {
                             let hr = recv_console_input(p.stdin_write.get(), msg.get());
-                            ck("RunHandler", 1050, "RecvConsoleInput(hStdInWrite, reply)", hr, "");
+                            ck("RunHandler", op.l(1050), "RecvConsoleInput(hStdInWrite, reply)", hr, "");
                             if hr < 0 {
                                 op.hr = hr;
                                 return;
@@ -273,14 +283,14 @@ unsafe fn run_inner(op: &mut Op, session: Obj, received: Obj, reply: Obj, req: &
         }
         if flags & RUN_FLAG_REDIRECT_OUTPUT != 0 {
             let hr = send_console_output(p.stdout_read.get(), session, Some(&mut out_read));
-            ck("RunHandler", 1078, "SendConsoleOutput(hStdOutRead, session, &fStdOutRead)", hr, "");
+            ck("RunHandler", op.l(1078), "SendConsoleOutput(hStdOutRead, session, &fStdOutRead)", hr, "");
             if hr < 0 {
                 op.hr = hr;
                 return;
             }
             if !p.stderr_read.get().is_null() {
                 let hr = send_console_error(p.stderr_read.get(), session, Some(&mut err_read));
-                ck("RunHandler", 1082, "SendConsoleError(hStdErrRead, session, &fStdErrRead)", hr, "");
+                ck("RunHandler", op.l(1082), "SendConsoleError(hStdErrRead, session, &fStdErrRead)", hr, "");
                 if hr < 0 {
                     op.hr = hr;
                     return;

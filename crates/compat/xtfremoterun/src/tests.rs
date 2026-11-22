@@ -7,54 +7,102 @@ use core::ffi::c_void;
 use core::ptr::null_mut;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, Once};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use xtfmsg::com::{self, Obj, IID_XBTP_EXTENSION_METADATA};
 use xtfmsg::fixture::{self, end_json, end_message, load_xbtp, message_with_json, push_inbound, push_inbound_error};
 use xtfmsg::sys::*;
 
 pub static LOCK: Mutex<()> = Mutex::new(());
-static INIT: Once = Once::new();
+static INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub const CHILD_ENV: &str = "XTFREMOTERUN_CHILD";
-pub const CHILD_IMAGE: &str = "D:\\DevelopmentFiles\\xtfremoterun_child.exe";
+pub const CHILD_NAME: &str = "xtfremoterun_child.exe";
+pub const CHILD_IMAGE: &str = "G:\\xtfremoterun_child.exe";
 pub const TEST_LINK_PORT: u32 = 47914;
+pub const BUILD_VAR: &str = "TOMBOX_CONSOLE_OSBUILD";
+pub const DEFAULT_TEST_BUILD: &str = "22000";
 
 pub fn root() -> PathBuf {
     std::env::temp_dir().join(format!("xtfremoterun-test-{}", std::process::id()))
 }
 
-pub fn guard() -> MutexGuard<'static, ()> {
-    INIT.call_once(|| {
-        let r = root();
-        let _ = std::fs::remove_dir_all(&r);
-        std::fs::create_dir_all(r.join("console").join("fs").join("C").join("Windows").join("System32")).unwrap();
-        std::env::set_var("TOMBOX_GDK_ROOT", &r);
-        std::env::set_var(CHILD_ENV, "1");
-        crate::client::TEST_LINK_PORT.store(TEST_LINK_PORT, std::sync::atomic::Ordering::SeqCst);
-        register_image(CHILD_IMAGE, std::env::current_exe().unwrap());
-        preload_current_xbtp(&r);
-        load_xbtp();
-    });
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+pub fn title_dir() -> PathBuf {
+    root().join("title")
 }
 
-pub fn preload_current_xbtp(dir: &std::path::Path) {
-    let exe = std::env::current_exe().unwrap();
-    for a in exe.ancestors() {
-        let b = a.join("build").join("xbtp");
-        let Ok(rd) = std::fs::read_dir(&b) else { continue };
-        let newest = rd
-            .flatten()
-            .map(|e| e.path().join("out").join("xbtp.dll"))
-            .filter(|p| p.is_file())
-            .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
-        if let Some(src) = newest {
-            let copy = dir.join("xbtp.dll");
-            std::fs::copy(&src, &copy).unwrap();
-            assert!(xtfmsg::xbtp::preload(&copy), "{}", copy.display());
-        }
-        return;
+pub const TITLE_CONFIG: &str = "<Game configVersion=\"1\"><Identity Name=\"Tombox.XtfRemoteRunTest\" Publisher=\"CN=Test\" Version=\"1.0.0.0\"/><ExecutableList><Executable Name=\"xtfremoterun_child.exe\" Id=\"Game\"/><Executable Name=\"absent.exe\" Id=\"Absent\"/><Executable Name=\"..\\escape.exe\" Id=\"Escape\"/></ExecutableList></Game>";
+
+fn init() -> Result<(), String> {
+    let r = root();
+    let _ = std::fs::remove_dir_all(&r);
+    std::fs::create_dir_all(r.join("console").join("fs").join("C").join("Windows").join("System32")).map_err(|e| format!("create sandbox under {}: {e}", r.display()))?;
+    let t = title_dir();
+    std::fs::create_dir_all(&t).map_err(|e| format!("create {}: {e}", t.display()))?;
+    std::fs::write(t.join("MicrosoftGame.config"), TITLE_CONFIG).map_err(|e| format!("write title config: {e}"))?;
+    std::fs::write(r.join("escape.exe"), b"MZ").map_err(|e| format!("write escape.exe: {e}"))?;
+    std::fs::write(t.join("unlisted.exe"), b"MZ").map_err(|e| format!("write unlisted.exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    std::fs::copy(&exe, t.join(CHILD_NAME)).map_err(|e| format!("copy {} into the title: {e}", exe.display()))?;
+    std::env::set_var("TOMBOX_GDK_ROOT", &r);
+    std::env::set_var("TOMBOX_GDK_EARLY", "0");
+    if compat_common::gdk::title().dir.is_some() {
+        return Err(format!("the test exe unexpectedly runs inside a title package: {:?}", compat_common::gdk::title().dir));
+    }
+    crate::title::TEST_TITLE_DIR.set(t.clone()).map_err(|_| "the test title directory was already set".to_string())?;
+    std::env::set_var(BUILD_VAR, DEFAULT_TEST_BUILD);
+    std::env::set_var(CHILD_ENV, "1");
+    crate::client::TEST_LINK_PORT.store(TEST_LINK_PORT, std::sync::atomic::Ordering::SeqCst);
+    let st = crate::title::state();
+    if st.dir.as_deref() != Some(t.as_path()) {
+        return Err(format!("title state resolved {:?} instead of the test title {}", st.dir, t.display()));
+    }
+    if st.job == 0 {
+        return Err(format!("creating the title job failed: {}", st.job_error));
+    }
+    crate::title::ensure();
+    Ok(())
+}
+
+pub fn guard() -> MutexGuard<'static, ()> {
+    if let Err(e) = INIT.get_or_init(init) {
+        panic!("xtfremoterun test setup failed: {e}");
+    }
+    load_xbtp();
+    let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(BUILD_VAR, DEFAULT_TEST_BUILD);
+    g
+}
+
+pub struct Build(&'static str);
+
+impl Build {
+    pub fn set(b: &'static str) -> Build {
+        std::env::set_var(BUILD_VAR, b);
+        Build(b)
+    }
+}
+
+impl Drop for Build {
+    fn drop(&mut self) {
+        let _ = self.0;
+        std::env::set_var(BUILD_VAR, DEFAULT_TEST_BUILD);
+    }
+}
+
+pub struct NoTitleJobs;
+
+impl NoTitleJobs {
+    pub fn new() -> NoTitleJobs {
+        unregister_job(NT_TITLE_JOB);
+        unregister_job(HOST_TITLE_JOB);
+        NoTitleJobs
+    }
+}
+
+impl Drop for NoTitleJobs {
+    fn drop(&mut self) {
+        crate::title::install_jobs();
     }
 }
 
@@ -117,6 +165,27 @@ fn child_wait_main() {
 
 #[test]
 #[ignore]
+fn child_title_state_main() {
+    if !child_enabled() {
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let dir = exe.parent().unwrap().to_path_buf();
+    let st = crate::title::state();
+    if st.dir.as_deref() != Some(dir.as_path()) {
+        std::process::exit(10);
+    }
+    if st.executables != vec![crate::title::TitleExecutable { console_path: CHILD_IMAGE.to_string(), host_path: dir.join(CHILD_NAME) }] {
+        std::process::exit(11);
+    }
+    if st.job == 0 {
+        std::process::exit(12);
+    }
+    std::process::exit(0);
+}
+
+#[test]
+#[ignore]
 fn child_marker_main() {
     if !child_enabled() {
         return;
@@ -161,9 +230,6 @@ impl Jobs {
             }
             Jobs { names: names.to_vec(), jobs }
         }
-    }
-    pub fn title() -> Jobs {
-        Jobs::new(&[NT_TITLE_JOB, HOST_TITLE_JOB])
     }
 }
 
@@ -298,7 +364,37 @@ fn run_handler_request_errors_report_console_lines() {
         let end = r.end.unwrap();
         assert!(end.contains("run.cpp : 932"), "{end}");
         assert!(r.sent.is_empty());
+        let _b = Build::set("19041");
+        let r = run_with("not json", &[]);
+        let end = r.end.unwrap();
+        assert!(end.contains("run.cpp : 873"), "{end}");
+        for (req, line) in cases {
+            let r = run_with(req, &[]);
+            assert_eq!(r.end.as_deref(), Some(error_body(E_JSON_NOT_FOUND as u32, &[line - 52]).as_str()), "19041 {req}");
+        }
+        let r = run_with("{\"dwFlags\":0,\"dwPeriod\":0,\"CommandLine\":\"x\",\"WorkingDirectory\":\"\",\"Run_Error_Output\":\"yes\"}", &[]);
+        assert!(r.end.unwrap().contains("run.cpp : 880"));
+        let r = run_with(&request(1, 0, &child_cmd("child_marker_main"), "", false), &[]);
+        assert_eq!(r.end.as_deref(), Some("{\"ExitCode\":5}"));
+        let r = run_with(&request(1, 20, &child_cmd("child_wait_main"), "", false), &[Ok("{\"MsgId\":2,\"Result\":-5}")]);
+        assert_eq!(r.end.as_deref(), Some(error_body(-5i32 as u32, &[1005]).as_str()));
+        let r = run_with(&request(1, 20, &child_cmd("child_wait_main"), "", false), &[Err(E_FAIL)]);
+        assert_eq!(r.end.as_deref(), Some(error_body(E_FAIL as u32, &[1016]).as_str()));
+        for (b, want) in [(1u32, ConsoleCopyCase::Lines19041), (2, ConsoleCopyCase::Lines22000)] {
+            let copy = crate::variant::for_build(if b == 1 { 19041 } else { 22621 });
+            match want {
+                ConsoleCopyCase::Lines19041 => assert_eq!((copy.run_handler_line(1088), copy.create_process_line(433), copy.has_host_jobs(), copy.has_client2()), (1036, 430, false, false)),
+                ConsoleCopyCase::Lines22000 => assert_eq!((copy.run_handler_line(1088), copy.create_process_line(433), copy.has_host_jobs(), copy.has_client2()), (1088, 433, true, true)),
+            }
+        }
+        assert_eq!(crate::variant::for_build(21999), crate::variant::ConsoleCopy::Build19041);
+        assert_eq!(crate::variant::for_build(22000), crate::variant::ConsoleCopy::Build22000);
     }
+}
+
+enum ConsoleCopyCase {
+    Lines19041,
+    Lines22000,
 }
 
 #[test]
@@ -307,22 +403,33 @@ fn run_handler_without_console_jobs_fails_like_console_host() {
     unsafe {
         let want = (STATUS_OBJECT_NAME_NOT_FOUND | FACILITY_NT_BIT) as i32;
         assert_eq!(want as u32, 0xD000_0034);
+        let none = NoTitleJobs::new();
         let r = run_with(&request(1, 0, &child_cmd("child_marker_main"), "", false), &[]);
         assert_eq!(r.end.as_deref(), Some(error_body(want as u32, &[]).as_str()));
         let r = run_with(&request(5, 0, &child_cmd("child_marker_main"), "", false), &[]);
         assert_eq!(r.end.as_deref(), Some(error_body(want as u32, &[]).as_str()));
-        register_job(NT_TITLE_JOB, GetCurrentProcess());
+        register_job(NT_TITLE_JOB, crate::title::state().job as HANDLE);
         let r = run_with(&request(1, 0, &child_cmd("child_marker_main"), "", false), &[]);
-        unregister_job(NT_TITLE_JOB);
         let e = hr_from_wait(ERROR_FILE_NOT_FOUND) as u32;
         assert_eq!(r.end.as_deref(), Some(error_body(e, &[]).as_str()));
+        {
+            let _b = Build::set("19041");
+            let r = run_with(&request(1, 0, &child_cmd("child_marker_main"), "", false), &[]);
+            assert_eq!(r.end.as_deref(), Some("{\"ExitCode\":5}"));
+        }
+        drop(none);
+        let (status, h) = nt_open_job_object(NT_TITLE_JOB);
+        assert_eq!(status, 0);
+        CloseHandle(h);
+        let h = open_job_object_w(HOST_TITLE_JOB);
+        assert!(!h.is_null());
+        CloseHandle(h);
     }
 }
 
 #[test]
 fn create_process_maps_images_and_directories_through_the_sandbox() {
     let _g = guard();
-    let _j = Jobs::title();
     unsafe {
         let r = run_with(&request(1, 0, "C:\\tools\\absent.exe -x", "", false), &[]);
         assert_eq!(r.end.as_deref(), Some(error_body(hr_from_wait(ERROR_FILE_NOT_FOUND) as u32, &[]).as_str()));
@@ -330,10 +437,27 @@ fn create_process_maps_images_and_directories_through_the_sandbox() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("present.exe"), b"MZ").unwrap();
         let r = run_with(&request(1, 0, "C:\\tools\\present -x", "", false), &[]);
-        assert_eq!(r.end.as_deref(), Some(error_body(hr_from_wait(ERROR_NOT_SUPPORTED) as u32, &[]).as_str()));
+        assert_eq!(r.end.as_deref(), Some(error_body(hr_from_wait(ERROR_FILE_NOT_FOUND) as u32, &[]).as_str()));
         let r = run_with(&request(1, 0, &child_cmd("child_marker_main"), "C:\\no\\such\\dir", false), &[]);
         assert_eq!(r.end.as_deref(), Some(error_body(hr_from_wait(ERROR_DIRECTORY) as u32, &[]).as_str()));
-        assert_eq!(resolve_image("\"D:\\DevelopmentFiles\\xtfremoterun_child\" a b").unwrap(), format!("\"{}\" a b", std::env::current_exe().unwrap().display()));
+        let r = run_with(&request(1, 0, &child_cmd("child_title_state_main"), "", false), &[]);
+        assert_eq!(r.end.as_deref(), Some("{\"ExitCode\":0}"), "production gdk::title() lookup inside the launched title exe");
+        let host = title_dir().join(CHILD_NAME);
+        assert_eq!(resolve_image("\"G:\\xtfremoterun_child\" a b").unwrap(), format!("\"{}\" a b", host.display()));
+        assert_eq!(resolve_image("g:/XTFREMOTERUN_CHILD.EXE x").unwrap(), format!("\"{}\" x", host.display()));
+        assert_eq!(resolve_image("G:\\unlisted.exe"), Err(ERROR_FILE_NOT_FOUND));
+        assert_eq!(resolve_image("G:\\absent.exe"), Err(ERROR_FILE_NOT_FOUND));
+        assert_eq!(resolve_image("G:\\..\\escape.exe"), Err(ERROR_FILE_NOT_FOUND));
+        assert_eq!(resolve_image(&format!("\"{}\"", host.display())), Err(ERROR_FILE_NOT_FOUND));
+        assert_eq!(resolve_image("C:\\Windows\\System32\\cmd.exe /c echo"), Err(ERROR_FILE_NOT_FOUND));
+        let st = crate::title::state();
+        assert_eq!(st.executables, vec![crate::title::TitleExecutable { console_path: CHILD_IMAGE.to_string(), host_path: host.clone() }]);
+        assert_eq!(st.rejected, vec!["absent.exe".to_string(), "..\\escape.exe".to_string()]);
+        assert_eq!(crate::title::executable_names("<ExecutableList><Executable Name=\"a.exe\"/><ExecutableX Name=\"b.exe\"/><Executable\tName=\"c\\d.exe\" Id=\"x\"></Executable></ExecutableList>"), vec!["a.exe", "c\\d.exe"]);
+        assert_eq!(crate::title::safe_relative_name("bin/game.exe").as_deref(), Some("bin\\game.exe"));
+        for bad in ["", "\\x.exe", "C:x.exe", "a\\..\\x.exe", ".\\x.exe", "a\\\\x.exe"] {
+            assert_eq!(crate::title::safe_relative_name(bad), None, "{bad}");
+        }
         assert_eq!(console_sandbox::system::expand("%SystemRoot%\\System32"), "C:\\Windows\\System32");
     }
 }
@@ -341,7 +465,6 @@ fn create_process_maps_images_and_directories_through_the_sandbox() {
 #[test]
 fn run_without_wait_launches_and_replies_without_body() {
     let _g = guard();
-    let _j = Jobs::title();
     unsafe {
         let dir = root().join("console").join("fs").join("C").join("markers");
         std::fs::create_dir_all(&dir).unwrap();
@@ -357,7 +480,6 @@ fn run_without_wait_launches_and_replies_without_body() {
 #[test]
 fn run_with_wait_reports_exit_code_and_default_directory() {
     let _g = guard();
-    let _j = Jobs::title();
     unsafe {
         let win = root().join("console").join("fs").join("C").join("Windows");
         let _ = std::fs::remove_file(win.join("xtfremoterun_marker.txt"));
@@ -371,7 +493,6 @@ fn run_with_wait_reports_exit_code_and_default_directory() {
 #[test]
 fn run_redirects_stdout_and_separate_stderr() {
     let _g = guard();
-    let _j = Jobs::title();
     unsafe {
         let r = run_with(&request(RUN_FLAG_REDIRECT_OUTPUT | 1, 20, &child_cmd("child_streams_main"), "", true), &[]);
         assert_eq!(r.end.as_deref(), Some("{\"ExitCode\":3}"));
@@ -391,7 +512,6 @@ fn run_redirects_stdout_and_separate_stderr() {
 #[test]
 fn run_forwards_input_messages_to_child_stdin() {
     let _g = guard();
-    let _j = Jobs::title();
     unsafe {
         let flags = RUN_FLAG_REDIRECT_INPUT | RUN_FLAG_REDIRECT_OUTPUT | 1;
         let r = run_with(&request(flags, 20, &child_cmd("child_echo_main"), "", false), &[Ok("{\"MsgId\":7}"), Ok("{\"MsgId\":0,\"Run_Input\":\"ping\\n\"}")]);
@@ -404,7 +524,6 @@ fn run_forwards_input_messages_to_child_stdin() {
 #[test]
 fn run_stops_on_result_message_and_reports_negative_results() {
     let _g = guard();
-    let _j = Jobs::title();
     unsafe {
         let r = run_with(&request(1, 20, &child_cmd("child_wait_main"), "", false), &[Ok("{\"MsgId\":2,\"Result\":0}")]);
         assert_eq!(r.end, None);
@@ -464,3 +583,141 @@ fn console_pipe_helpers_round_trip_ansi_text() {
     }
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCommandLineW() -> *const u16;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn GetTokenInformation(token: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> BOOL;
+}
+
+pub const PROBE_ENV: &str = "XTFREMOTERUN_PROBE_HANDLE";
+pub const PROBE_SECRET: &[u8] = b"remoterun-secret";
+pub const SE_CHANGE_NOTIFY_LUID: u32 = 23;
+
+pub unsafe fn token_privileges() -> Vec<u32> {
+    let mut token = OwnedHandle::null();
+    assert_ne!(OpenProcessToken(GetCurrentProcess(), 8, &mut token.0), 0);
+    let mut buf = vec![0u32; 1024];
+    let mut len = 0u32;
+    assert_ne!(GetTokenInformation(token.get(), 3, buf.as_mut_ptr() as *mut c_void, (buf.len() * 4) as u32, &mut len), 0);
+    let n = buf[0] as usize;
+    (0..n).map(|i| buf[1 + i * 3]).collect()
+}
+
+#[test]
+#[ignore]
+fn child_args_main() {
+    if !child_enabled() {
+        return;
+    }
+    let line = unsafe { from_wide(GetCommandLineW()) };
+    let mut o = std::io::stdout();
+    let hex: String = line.bytes().map(|b| format!("{b:02x}")).collect();
+    o.write_all(format!("[{hex}]\n").as_bytes()).unwrap();
+    o.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    std::process::exit(0);
+}
+
+#[test]
+#[ignore]
+fn child_privileges_main() {
+    if !child_enabled() {
+        return;
+    }
+    let p = unsafe { token_privileges() };
+    if p.len() == 1 && p[0] != SE_CHANGE_NOTIFY_LUID {
+        std::process::exit(99);
+    }
+    std::process::exit(100 + p.len() as i32);
+}
+
+#[test]
+#[ignore]
+fn child_handle_probe_main() {
+    if !child_enabled() {
+        return;
+    }
+    let Some(v) = std::env::var(PROBE_ENV).ok().and_then(|v| v.parse::<usize>().ok()) else { std::process::exit(30) };
+    let mut buf = [0u8; 64];
+    let mut read = 0u32;
+    let mut avail = 0u32;
+    let ok = unsafe { PeekNamedPipe(v as HANDLE, buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut read, &mut avail, null_mut()) };
+    if ok != 0 && &buf[..read as usize] == PROBE_SECRET {
+        std::process::exit(20);
+    }
+    std::process::exit(0);
+}
+
+#[test]
+fn create_process_passes_arguments_verbatim_after_environment_expansion() {
+    let _g = guard();
+    unsafe {
+        let tail = " \"a  b\"   c\\\"d %SystemRoot%x";
+        let r = run_with(&request(RUN_FLAG_REDIRECT_OUTPUT | 1, 20, &format!("{}{tail}", child_cmd("child_args_main")), "", false), &[]);
+        assert_eq!(r.end.as_deref(), Some("{\"ExitCode\":0}"));
+        let out = joined(&r.sent, MSGID_RUN_OUTPUT, P_RUN_OUTPUT);
+        let hex = out.split('[').nth(1).and_then(|t| t.split(']').next()).unwrap_or_default().to_string();
+        let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect();
+        let out = format!("[{}]", String::from_utf8_lossy(&bytes));
+        let host = title_dir().join(CHILD_NAME);
+        let expected = format!("[\"{}\" tests::child_args_main --exact --ignored --nocapture --test-threads=1 -q \"a  b\"   c\\\"d C:\\Windowsx]", host.display());
+        assert!(out.contains(&expected), "{out:?} vs {expected:?}");
+    }
+}
+
+#[test]
+fn create_process_runs_with_restricted_token_unless_keep_token() {
+    let _g = guard();
+    unsafe {
+        let mine = token_privileges();
+        assert!(mine.len() > 1, "the test process token has only {mine:?}");
+        let r = run_with(&request(1, 0, &child_cmd("child_privileges_main"), "", false), &[]);
+        assert_eq!(r.end.as_deref(), Some("{\"ExitCode\":101}"), "a launch without RUN_FLAG_KEEP_TOKEN keeps only SeChangeNotifyPrivilege");
+        let r = run_with(&request(1 | RUN_FLAG_KEEP_TOKEN, 0, &child_cmd("child_privileges_main"), "", false), &[]);
+        assert_eq!(r.end.as_deref(), Some(format!("{{\"ExitCode\":{}}}", 100 + mine.len()).as_str()), "RUN_FLAG_KEEP_TOKEN launches with the caller token");
+    }
+}
+
+#[test]
+fn create_process_inherits_only_the_redirect_pipes() {
+    let _g = guard();
+    unsafe {
+        let sa = SecurityAttributes { length: core::mem::size_of::<SecurityAttributes>() as u32, descriptor: null_mut(), inherit: 1 };
+        let mut r: HANDLE = null_mut();
+        let mut wr: HANDLE = null_mut();
+        assert_ne!(CreatePipe(&mut r, &mut wr, &sa, 0), 0);
+        let (r, wr) = (OwnedHandle(r), OwnedHandle(wr));
+        let mut n = 0u32;
+        assert_ne!(WriteFile(wr.get(), PROBE_SECRET.as_ptr() as *const c_void, PROBE_SECRET.len() as u32, &mut n, null_mut()), 0);
+        std::env::set_var(PROBE_ENV, (r.get() as usize).to_string());
+        let plain = run_with(&request(1, 0, &child_cmd("child_handle_probe_main"), "", false), &[]);
+        let redirected = run_with(&request(RUN_FLAG_REDIRECT_INPUT | RUN_FLAG_REDIRECT_OUTPUT | 1, 20, &child_cmd("child_handle_probe_main"), "", true), &[]);
+        std::env::remove_var(PROBE_ENV);
+        assert_eq!(plain.end.as_deref(), Some("{\"ExitCode\":0}"), "an unrelated inheritable parent pipe is visible in a plain child");
+        assert_eq!(redirected.end.as_deref(), Some("{\"ExitCode\":0}"), "an unrelated inheritable parent pipe is visible in a redirected child");
+        drop(wr);
+        drop(r);
+    }
+}
+
+#[test]
+fn unregistered_images_fail_with_one_error_whatever_exists_on_disk() {
+    let _g = guard();
+    unsafe {
+        let dir = root().join("console").join("fs").join("C").join("tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("present.exe"), b"MZ").unwrap();
+        let expected = error_body(hr_from_wait(ERROR_FILE_NOT_FOUND) as u32, &[]);
+        for cmd in ["C:\\tools\\present.exe -x", "C:\\tools\\present -x", "C:\\tools\\absent.exe -x", "G:\\unlisted.exe", "G:\\..\\escape.exe", "G:\\absent.exe", "G:\\sub\\..\\..\\escape.exe"] {
+            let r = run_with(&request(1, 0, cmd, "", false), &[]);
+            assert_eq!(r.end.as_deref(), Some(expected.as_str()), "{cmd}");
+        }
+        let host = title_dir().join(CHILD_NAME);
+        assert_eq!(resolve_image("G:\\sub\\..\\xtfremoterun_child.exe y").unwrap(), format!("\"{}\" y", host.display()));
+        assert_eq!(resolve_image("\\\\?\\G:\\xtfremoterun_child.exe").unwrap(), format!("\"{}\"", host.display()));
+    }
+}

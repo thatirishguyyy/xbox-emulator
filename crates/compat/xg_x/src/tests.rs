@@ -143,7 +143,7 @@ fn micro_tiled_and_linear_texel_addresses_match_console() {
         type Off = extern "system" fn(*mut c_void, u32, u32, u64, u32, u32, u32, *mut u32) -> u64;
         let ft: Off = unsafe { core::mem::transmute(*(*(t as *const *const usize)).add(6)) };
         let fu: Off = unsafe { core::mem::transmute(*(*(u as *const *const usize)).add(6)) };
-        let l = layout::compute(&tex2d(d.as_ptr() as *const u8)).unwrap();
+        let l = layout::compute(&tex2d(d.as_ptr() as *const u8).unwrap()).unwrap();
         for (mi, m) in l.mips.iter().enumerate() {
             for z in 0..m.padded_d.min(2) {
                 for y in 0..m.height {
@@ -163,7 +163,7 @@ fn copy_round_trips_through_tiled_memory() {
     let d = desc2d(300, 70, 0, 2, 28, 14);
     let mut c: *mut c_void = core::ptr::null_mut();
     assert_eq!(XGCreateTexture2DComputer(d.as_ptr() as *const u8, &mut c), 0);
-    let l = layout::compute(&tex2d(d.as_ptr() as *const u8)).unwrap();
+    let l = layout::compute(&tex2d(d.as_ptr() as *const u8).unwrap()).unwrap();
     let mut res = vec![0u8; l.size as usize];
     type Cp = extern "system" fn(*mut c_void, *mut u8, u32, u32, *const u8, u32, u32) -> i32;
     let into: Cp = unsafe { core::mem::transmute(*(*(c as *const *const usize)).add(8)) };

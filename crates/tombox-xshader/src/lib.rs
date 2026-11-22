@@ -27,8 +27,10 @@ pub mod gds_abi;
 pub mod global_abi;
 pub mod centroid_abi;
 pub mod runtime_hlsl;
+pub mod cbv_raw_hlsl;
 #[cfg(windows)]
 pub mod shader_cache;
+pub mod branch_free;
 #[cfg(windows)]
 #[path = "../../tools/xreplay/src/d3d.rs"]
 #[allow(dead_code)]
@@ -38,6 +40,8 @@ pub(crate) mod d3d;
 pub mod fma_probe;
 #[cfg(test)]
 mod sm5_helpers_tests;
+#[cfg(all(test, windows))]
+mod fma16_tests;
 
 #[cfg(windows)]
 fn dxil_disassembly(dxbc: &[u8]) -> Option<String> {

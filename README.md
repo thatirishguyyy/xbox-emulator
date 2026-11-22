@@ -8,7 +8,7 @@ Uses legally obtained, already-decrypted dumps. The runtime does no key extracti
 
 **Source code:** the emulator's Rust workspace is in this repo: [`crates/`](crates/), [`tools/`](tools/) and `Cargo.toml`. It contains no game files, binaries or build output.
 
-**Contributing:** pull requests are welcome, especially console library functions still marked missing in the [library map](docs/LIBRARY_MAP.md). See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed MIT OR Apache-2.0.
+**Contributing:** pull requests are welcome, especially console library functions still marked missing in the [library map](docs/LIBRARY_MAP.md). See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed GPL-3.0-or-later (see [LICENSE](LICENSE)). Releases before this change remain available under MIT OR Apache-2.0.
 
 ## Status
 

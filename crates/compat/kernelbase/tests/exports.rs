@@ -4,7 +4,17 @@ use common::*;
 
 type Get = unsafe extern "system" fn(*const u16, *mut [u32; 2]) -> i32;
 
+fn isolate_data_root() {
+    static I: std::sync::Once = std::sync::Once::new();
+    I.call_once(|| {
+        let d = std::env::temp_dir().join(format!("tombox-kernelbase-dll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::env::set_var("TOMBOX_GDK_ROOT", &d);
+    });
+}
+
 fn get() -> Get {
+    isolate_data_root();
     let h = load_built("kernelbase.dll", "tbx_kernelbase.dll");
     assert_eq!(check_forwarders(h, &[]), 0);
     unsafe { core::mem::transmute(proc(h, "GetPackageInstallTime")) }
@@ -32,6 +42,21 @@ fn family_xref_round_trips_through_get_package_install_time() {
         assert_eq!(ft, [0x89ab_cdef, 0x0123_4567]);
         assert_eq!(remove(core::ptr::null(), full.as_ptr()), 0);
         assert_eq!(get(full.as_ptr(), &mut ft), 0x490);
+        assert_eq!(remove(core::ptr::null(), full.as_ptr()), 0);
+        assert_eq!(add(core::ptr::null(), full.as_ptr(), core::ptr::null(), 3, 0x0000_0001_0000_0002), 0);
+    }
+    let root = std::path::PathBuf::from(std::env::var("TOMBOX_GDK_ROOT").unwrap());
+    let hku = root.join("hku");
+    let users: Vec<_> = std::fs::read_dir(&hku).unwrap().filter_map(|e| e.ok()).collect();
+    let fam = format!("TomBox.XrefDll{}_8wekyb3d8bbwe", std::process::id());
+    let pkg = format!("TomBox.XrefDll{}_2.0.0.0_x64__8wekyb3d8bbwe", std::process::id());
+    let dir = users.iter().map(|u| u.path().join(r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Families").join(&fam)).find(|d| d.is_dir()).expect("family key persisted in the emulated HKU store");
+    assert!(std::fs::read_to_string(dir.join(".security.sddl")).unwrap().starts_with("D:AR(A;OICI;KR;;;S-1-15-2-1)"));
+    assert_eq!(std::fs::read_to_string(dir.join(&pkg).join("Flags.dword")).unwrap().trim(), "3");
+    assert_eq!(std::fs::read_to_string(dir.join(&pkg).join("InstallTime.qword")).unwrap().trim(), "4294967298");
+    unsafe {
+        assert_eq!(get(full.as_ptr(), &mut ft), 0);
+        assert_eq!(ft, [2, 1]);
         assert_eq!(remove(core::ptr::null(), full.as_ptr()), 0);
     }
 }

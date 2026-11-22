@@ -44,6 +44,85 @@ pub const IID_XBTP_DISPATCHER: GUID = GUID::new(0xe6358d7e, 0x3b86, 0x425b, [0xb
 pub const IID_XBTP_DISPATCHER_ALT: GUID = GUID::new(0x335b4b4b, 0xc976, 0x4356, [0xa5, 0x6e, 0xc5, 0x01, 0x61, 0xfc, 0x77, 0x40]);
 pub const MAX_SESSION_KEY: usize = 0x20;
 pub const E_PIPE_ALREADY_ADDED: HRESULT = 0x8007_1392u32 as i32;
+pub const E_REDIRECT_NOT_SPECIFIED: HRESULT = 0x8c11_0307u32 as i32;
+pub const STATUS_REDIRECTED: i32 = -6;
+
+pub struct RedirectData {
+    pub incoming_port: u32,
+    pub listener: Mutex<SharedPtr<XbtpConnection>>,
+    pub location: Mutex<Option<Vec<u8>>>,
+    pub redirect_port: AtomicU32,
+}
+
+unsafe impl Send for RedirectData {}
+unsafe impl Sync for RedirectData {}
+
+impl RedirectData {
+    pub unsafe fn update_location(&self, address: *const u16, port: u32) -> HRESULT {
+        let mut loc = self.location.lock().unwrap_or_else(|e| e.into_inner());
+        *loc = None;
+        self.redirect_port.store(port, Ordering::SeqCst);
+        if address.is_null() {
+            return S_OK;
+        }
+        let mut len = 0u32;
+        let mut text: *mut u8 = null_mut();
+        let hr = crate::conn::tcp_redirect_location(port, address, &mut len, &mut text);
+        if hr >= 0 && !text.is_null() {
+            *loc = Some(core::slice::from_raw_parts(text, len as usize).to_vec());
+        }
+        if !text.is_null() {
+            free(text as *mut c_void);
+        }
+        hr
+    }
+
+    pub unsafe fn open_connection(&self) -> HRESULT {
+        let mut conn = SharedPtr::<crate::conn::TcpConnection>::default();
+        let hr = crate::conn::TcpConnection_InitializeServer_sp(self.incoming_port, &mut conn);
+        if hr < 0 {
+            conn.release();
+            return hr;
+        }
+        let mut l = self.listener.lock().unwrap_or_else(|e| e.into_inner());
+        l.release();
+        *l = conn.cast();
+        hr
+    }
+
+    pub fn format_location(&self) -> Result<Vec<u8>, HRESULT> {
+        match self.location.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(v) => Ok(v.clone()),
+            None => Err(E_REDIRECT_NOT_SPECIFIED),
+        }
+    }
+}
+
+pub unsafe fn add_redirect(d: &DispatcherImpl, incoming_port: u32, address: *const u16, redirect_port: u32) -> HRESULT {
+    let mut list = d.redirects.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = list.iter().find(|r| r.incoming_port == incoming_port) {
+        let hr = r.update_location(address, redirect_port);
+        if hr >= 0 {
+            log_info_args(b"Redirect added %d -> %ws : %d\0", &[incoming_port as usize, address as usize, redirect_port as usize]);
+        }
+        return hr;
+    }
+    let r = Arc::new(RedirectData { incoming_port, listener: Mutex::new(SharedPtr::default()), location: Mutex::new(None), redirect_port: AtomicU32::new(0) });
+    let hr = r.update_location(address, redirect_port);
+    if hr < 0 {
+        return hr;
+    }
+    let hr = r.open_connection();
+    if hr < 0 {
+        log_error_args(b"Failed 0x%X to open redirect connection\0", &[hr as u32 as usize]);
+        return hr;
+    }
+    list.push(r);
+    drop(list);
+    SetEvent(d.wake);
+    log_info_args(b"Redirect added %d -> %ws : %d\0", &[incoming_port as usize, address as usize, redirect_port as usize]);
+    hr
+}
 
 const ST_DONE: u32 = 0;
 const ST_CONNECT: u32 = 1;
@@ -57,6 +136,7 @@ pub struct DispatcherImpl {
     pub link: SharedPtr<XbtpConnection>,
     pub pipes: Mutex<Vec<SharedPtr<XbtpConnection>>>,
     pub pipe_paths: Mutex<Vec<Vec<u16>>>,
+    pub redirects: Mutex<Vec<Arc<RedirectData>>>,
     pub shutdown: HANDLE,
     pub stopped: HANDLE,
     pub wake: HANDLE,
@@ -131,6 +211,7 @@ pub unsafe extern "C" fn XbtpConnectionDispatcher_Initialize(this: *mut XbtpConn
         link: l,
         pipes: Mutex::new(Vec::new()),
         pipe_paths: Mutex::new(Vec::new()),
+        redirects: Mutex::new(Vec::new()),
         shutdown,
         stopped,
         wake,
@@ -194,16 +275,22 @@ pub unsafe fn set_session_key(d: &DispatcherImpl, key: *const u16) -> HRESULT {
     S_OK
 }
 
-unsafe fn connection_list(d: &DispatcherImpl) -> Vec<SharedPtr<XbtpConnection>> {
+unsafe fn connection_list(d: &DispatcherImpl) -> Vec<(SharedPtr<XbtpConnection>, Option<Arc<RedirectData>>)> {
     let mut v = Vec::new();
     if !d.tcp.ptr.is_null() {
-        v.push(d.tcp.clone_ref());
+        v.push((d.tcp.clone_ref(), None));
     }
     if !d.link.ptr.is_null() {
-        v.push(d.link.clone_ref());
+        v.push((d.link.clone_ref(), None));
+    }
+    for r in d.redirects.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        let l = r.listener.lock().unwrap_or_else(|e| e.into_inner());
+        if !l.ptr.is_null() {
+            v.push((l.clone_ref(), Some(r.clone())));
+        }
     }
     for p in d.pipes.lock().unwrap().iter() {
-        v.push(p.clone_ref());
+        v.push((p.clone_ref(), None));
     }
     v
 }
@@ -269,11 +356,11 @@ unsafe fn run_loop(d: &Arc<DispatcherImpl>) -> HRESULT {
         let conns = connection_list(d);
         let mut handles = vec![d.shutdown, d.wake];
         let mut owners = Vec::new();
-        for c in conns.iter() {
+        for (c, r) in conns.iter() {
             let mut ev: HANDLE = null_mut();
             if connection_event(c.ptr, &mut ev) >= 0 && !ev.is_null() {
                 handles.push(ev);
-                owners.push(c.ptr);
+                owners.push((c.ptr, r.clone()));
             }
         }
         let w = WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE);
@@ -290,7 +377,8 @@ unsafe fn run_loop(d: &Arc<DispatcherImpl>) -> HRESULT {
             return hr;
         }
         let mut ch: *mut XbtpChannel = null_mut();
-        let hr = connection_accept(owners[i - 2], &mut ch);
+        let (owner, redirect) = owners[i - 2].clone();
+        let hr = connection_accept(owner, &mut ch);
         if hr == E_PENDING {
             continue;
         }
@@ -301,7 +389,7 @@ unsafe fn run_loop(d: &Arc<DispatcherImpl>) -> HRESULT {
         if ch.is_null() {
             continue;
         }
-        begin_session(d, ch);
+        begin_session(d, ch, redirect);
     }
 }
 
@@ -312,7 +400,7 @@ unsafe fn drop_channel(p: *mut c_void) {
 struct SendPtr(*mut XbtpChannel);
 unsafe impl Send for SendPtr {}
 
-unsafe fn begin_session(d: &Arc<DispatcherImpl>, ch: *mut XbtpChannel) {
+unsafe fn begin_session(d: &Arc<DispatcherImpl>, ch: *mut XbtpChannel, redirect: Option<Arc<RedirectData>>) {
     let key = d.session_key.lock().unwrap().clone();
     let dd = d.clone();
     let p = SendPtr(ch);
@@ -325,7 +413,7 @@ unsafe fn begin_session(d: &Arc<DispatcherImpl>, ch: *mut XbtpChannel) {
                 return;
             }
         };
-        let mut a = ServerAdapter { dispatcher: dd, channel, session_id: GUID::default(), extension: GUID::default(), key };
+        let mut a = ServerAdapter { dispatcher: dd, channel, session_id: GUID::default(), extension: GUID::default(), key, redirect };
         a.run();
     });
     let mut s = d.sessions.lock().unwrap();
@@ -339,6 +427,7 @@ pub struct ServerAdapter {
     pub session_id: GUID,
     pub extension: GUID,
     pub key: Option<Vec<u16>>,
+    pub redirect: Option<Arc<RedirectData>>,
 }
 
 unsafe fn send_bytes(ch: *mut XbtpChannel, mut v: Vec<u8>) -> HRESULT {
@@ -452,8 +541,16 @@ impl ServerAdapter {
         if hr < 0 {
             return hr;
         }
-        let valid = registry_impl(self.dispatcher.registry.ptr).is_valid(&req.extension_id);
-        let status = if valid {
+        let mut location: Vec<u8> = Vec::new();
+        let status = if let Some(r) = self.redirect.as_ref() {
+            match r.format_location() {
+                Ok(v) => {
+                    location = v;
+                    STATUS_REDIRECTED
+                }
+                Err(hr) => return hr,
+            }
+        } else if registry_impl(self.dispatcher.registry.ptr).is_valid(&req.extension_id) {
             self.session_id = req.session_id;
             self.extension = req.extension_id;
             log_info_args(b"Session negotiated\0", &[]);
@@ -461,7 +558,7 @@ impl ServerAdapter {
         } else {
             STATUS_EXTENSION_UNKNOWN
         };
-        let hr = match build_create_session_response(XBTP_PROTOCOL_V1_SIGNATURE as u16, &req.session_id, status, &[]) {
+        let hr = match build_create_session_response(XBTP_PROTOCOL_V1_SIGNATURE as u16, &req.session_id, status, &location) {
             Ok(v) => send_bytes(ch, v),
             Err(hr) => hr,
         };

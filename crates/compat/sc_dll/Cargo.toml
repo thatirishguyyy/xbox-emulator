@@ -3,7 +3,7 @@ name = "sc_dll"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox console AMD shader compiler sc_dll.dll: the console's pure entry points (version checks, option bitsets, export table, retail no-op dump/assemble/metadata entries, compact option copy, debug-map tag checks) natively, and the compiler, VIH, output-handle and option-generator entry points forwarded to the console's own sc_dll.dll from the title dump."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

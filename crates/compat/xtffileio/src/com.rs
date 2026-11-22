@@ -44,6 +44,7 @@ extern "C" {
     pub fn XbtpCreateJsonObject(out: *mut *mut c_void) -> HRESULT;
     pub fn XbtpCreateJsonArray(out: *mut *mut c_void) -> HRESULT;
     pub fn XbtpGetJsonObjectFromUtf8(utf8: *const u8, out: *mut *mut c_void) -> HRESULT;
+    pub fn XbtpOpenSession2(address: *const u16, port: u32, options: *const c_void, extension: *const GUID, iid: *const GUID, out: *mut *mut c_void) -> HRESULT;
 }
 
 #[cfg(test)]
@@ -79,15 +80,43 @@ mod xbtp_built {
             .unwrap_or_else(|| panic!("{name} is not built in the target dir above {}", exe.display()))
     }
 
+    fn newest_build_copy() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        for a in exe.ancestors() {
+            let Ok(rd) = std::fs::read_dir(a.join("build").join("xbtp")) else { continue };
+            let src = rd.flatten().map(|e| e.path().join("out").join("xbtp.dll")).filter(|p| p.is_file()).max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())?;
+            let dir = std::env::temp_dir().join(format!("xtffileio-xbtp-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).ok()?;
+            let copy = dir.join("xbtp.dll");
+            std::fs::copy(&src, &copy).ok()?;
+            return Some(copy);
+        }
+        None
+    }
+
     fn module() -> *mut c_void {
         static XBTP: OnceLock<usize> = OnceLock::new();
         *XBTP.get_or_init(|| {
-            let path = built_dll("xbtp.dll");
+            let path = newest_build_copy().unwrap_or_else(|| built_dll("xbtp.dll"));
             let wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
             let h = unsafe { LoadLibraryW(wide.as_ptr()) };
             assert!(!h.is_null(), "LoadLibraryW({}) failed", path.display());
             h as usize
         }) as *mut c_void
+    }
+
+    pub unsafe fn xbtp_export(name: &[u8]) -> *mut c_void {
+        export(name)
+    }
+
+    pub unsafe fn XbtpOpenSession2(address: *const u16, port: u32, options: *const c_void, extension: *const GUID, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
+        let f: unsafe extern "C" fn(*const u16, u32, *const c_void, *const GUID, *const GUID, *mut *mut c_void) -> HRESULT = core::mem::transmute(export(b"XbtpOpenSession2\0"));
+        f(address, port, options, extension, iid, out)
+    }
+
+    pub unsafe fn XbtpOpenSessionEx2(address: *const u16, port: u32, options: *const c_void, extension: *const GUID, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
+        let f: unsafe extern "C" fn(*const u16, u32, *const c_void, *const GUID, *const GUID, *mut *mut c_void) -> HRESULT = core::mem::transmute(export(b"XbtpOpenSessionEx2\0"));
+        f(address, port, options, extension, iid, out)
     }
 
     unsafe fn export(name: &[u8]) -> *mut c_void {

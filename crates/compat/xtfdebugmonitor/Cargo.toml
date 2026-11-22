@@ -3,7 +3,7 @@ name = "xtfdebugmonitor"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console xtfdebugmonitor.dll (Xbox Tools Framework debug-monitor extension: DebugActiveProcess-based process debug event streaming)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]
@@ -14,6 +14,10 @@ path = "src/lib.rs"
 [dependencies]
 xtfcommon = { path = "../xtfcommon" }
 xtfmsg = { path = "../xtfmsg" }
+compat-common = { path = "../compat-common" }
 
 [build-dependencies]
 xtfcommon = { path = "../xtfcommon" }
+
+[dev-dependencies]
+xbtp = { path = "../xbtp" }

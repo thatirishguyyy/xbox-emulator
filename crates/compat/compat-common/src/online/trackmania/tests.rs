@@ -218,3 +218,41 @@ fn seeded_campaign_map_resolves_in_core_and_live() {
     assert_eq!(info["goldTime"], 22000);
     assert_eq!(t.core.seed_map(&json!({"mapUid": "camp01"}), vec![]).unwrap()["mapId"], m["mapId"]);
 }
+
+#[test]
+fn space_parameters_carry_nadeo_masterserver_url() {
+    let t = tm();
+    let space = t.ubi.space_id.clone();
+    let groups = "us-sdkClientFeaturesSwitches,us-sdkClientUrls,NadeoServicesParameters,UbiConnect";
+    let r = t.route(&req("GET", "public-ubiservices.ubi.com", &format!("/v1/spaces/{space}/parameters"), &[("parameterGroups", groups)], &[], b"")).unwrap();
+    assert_eq!(r.status, 200);
+    let b = body(&r);
+    let url = b["parameters"]["NadeoServicesParameters"]["fields"]["masterserver_init_url"].as_str().unwrap();
+    assert!(url.starts_with("https://") && url.trim_end_matches('/').ends_with(CORE));
+    assert!(b["parameters"]["us-sdkClientUrls"].is_object());
+    let other = body(&t.route(&req("GET", "public-ubiservices.ubi.com", &format!("/v1/spaces/{space}/parameters"), &[("parameterGroups", "us-sdkClientUrls")], &[], b"")).unwrap());
+    assert!(other["parameters"].get("NadeoServicesParameters").is_none());
+    let host = url.split("://").nth(1).unwrap().split('/').next().unwrap();
+    let routes = t.route(&req("GET", host, "/api/routes", &[("usage", "Client")], &[], b"")).unwrap();
+    assert_ne!(routes.status, 404, "the masterserver host must serve Nadeo core routes");
+}
+
+#[test]
+fn contact_url_patch_updates_the_open_connection() {
+    let t = tm();
+    let cid = crate::online::util::random_uuid();
+    crate::online::xdefiant::store::open_connection(&t.ubi.profile_id, &cid);
+    let r = t.route(&req("PATCH", "public-ubiservices.ubi.com", &format!("/v1/profiles/connections/{cid}"), &[], &[], br#"{"notificationTypes":["US_CONNECTION_ESTABLISHED"],"spaceIds":["72c7e441-cf95-56e4-a2b3-3abed655b33a"]}"#)).unwrap();
+    assert_eq!(r.status, 200);
+    let c = body(&r);
+    assert_eq!(c["connectionId"].as_str().unwrap(), cid);
+    assert_eq!(c["notificationTypes"][0], "US_CONNECTION_ESTABLISHED");
+    assert_eq!(body(&t.route(&req("GET", "public-ubiservices.ubi.com", &format!("/v1/profiles/connections/{cid}"), &[], &[], b"")).unwrap())["spaceIds"][0], "72c7e441-cf95-56e4-a2b3-3abed655b33a");
+    let foreign = crate::online::util::random_uuid();
+    crate::online::xdefiant::store::open_connection("99999999-9999-9999-9999-999999999999", &foreign);
+    assert_eq!(t.route(&req("PATCH", "public-ubiservices.ubi.com", &format!("/v1/profiles/connections/{foreign}"), &[], &[], b"{}")).unwrap().status, 403);
+    let gone = t.route(&req("PATCH", "public-ubiservices.ubi.com", "/v1/profiles/connections/00000000-0000-0000-0000-000000000000", &[], &[], b"{}")).unwrap();
+    assert_eq!(gone.status, 404);
+    crate::online::xdefiant::store::close_connection(&cid);
+    crate::online::xdefiant::store::close_connection(&foreign);
+}

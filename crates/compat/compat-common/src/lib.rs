@@ -28,6 +28,7 @@ pub mod gdk_user;
 pub mod gdk_store;
 pub mod gdk;
 pub mod gamepad;
+pub mod host_input;
 pub mod gameinput_ext;
 pub mod online;
 pub mod os_host;
@@ -35,6 +36,10 @@ pub mod timer;
 pub mod live;
 pub mod title_os;
 pub mod kmd_bridge;
+pub mod private_heap;
+
+#[global_allocator]
+static TB_ALLOC: private_heap::PrivateHeap = private_heap::PrivateHeap;
 
 /// Value of `key=` in `tombox.cfg` next to the host executable (user-side configuration that
 /// lives with the game data, not in the repository).

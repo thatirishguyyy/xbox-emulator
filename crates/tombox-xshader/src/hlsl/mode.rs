@@ -37,7 +37,6 @@ uint tb_zs(float a, float b, uint k) { uint sa = asuint(a) >> 31, sb = asuint(b)
 uint tb_h_add(float a, float b, uint m) { uint k = (m >> 2) & 3u; return tb_h_rnd((double)a + (double)b, 0.0, k, tb_zs(a, b, k)); }
 uint tb_h_mul(float a, float b, uint m) { return tb_h_rnd((double)a * (double)b, 0.0, (m >> 2) & 3u, (asuint(a) ^ asuint(b)) >> 31); }
 uint tb_h_fma(float a, float b, float c, uint m) { uint k = (m >> 2) & 3u; precise double p = (double)a * (double)b; precise double s = p + (double)c; precise double bb = s - p; precise double er = (p - (s - bb)) + ((double)c - bb); uint sp = (asuint(a) ^ asuint(b)) >> 31, sc = asuint(c) >> 31; return tb_h_rnd(s, er, k, (sp & sc) | ((k == 2u) ? (sp | sc) : 0u)); }
-uint tb_h_mad(float a, float b, float c, uint m) { float p = tb_hz(f16tof32(tb_h_mul(tb_hz(a), tb_hz(b), m))); return tb_hzb(tb_h_add(p, tb_hz(c), m)); }
 uint tb_h_cvt(double x, uint m, uint zs) { return tb_h_rnd(x, 0.0, (m >> 2) & 3u, zs); }
 "#;
 
@@ -126,7 +125,7 @@ pub(super) fn uses_mad(insns: &[Insn]) -> bool {
 pub(super) fn is_mad(m: &str) -> bool {
     matches!(
         m,
-        "v_mac_f32" | "v_mac_legacy_f32" | "v_mad_f32" | "v_mad_legacy_f32" | "v_madmk_f32" | "v_madak_f32" | "v_mac_f16" | "v_madmk_f16" | "v_madak_f16"
+        "v_mac_f32" | "v_mac_legacy_f32" | "v_mad_f32" | "v_mad_legacy_f32" | "v_madmk_f32" | "v_madak_f32"
     )
 }
 
@@ -303,7 +302,7 @@ impl Emitter<'_> {
         }
         let mut srcs = all(p, s.len().min(3));
         let dp = dhalf(p)?;
-        if matches!(m, "v_mac_f32" | "v_fmac_f32" | "v_mac_legacy_f32" | "v_mac_f16") {
+        if matches!(m, "v_mac_f32" | "v_fmac_f32" | "v_mac_legacy_f32" | "v_fmac_f16") {
             if let Some(o) = d.clone() {
                 srcs.push((o, dp));
             }
@@ -475,7 +474,7 @@ impl Emitter<'_> {
         let u = self.mode_use;
         let f16_ops = matches!(
             m,
-            "v_add_f16" | "v_sub_f16" | "v_subrev_f16" | "v_mul_f16" | "v_fma_f16" | "v_mac_f16" | "v_madmk_f16" | "v_madak_f16" | "v_ldexp_f16" | "v_cvt_f16_f32"
+            "v_add_f16" | "v_sub_f16" | "v_subrev_f16" | "v_mul_f16" | "v_fma_f16" | "v_fmac_f16" | "v_fmamk_f16" | "v_fmaak_f16" | "v_ldexp_f16" | "v_cvt_f16_f32"
                 | "v_cvt_f16_i16" | "v_cvt_f16_u16" | "v_pk_add_f16" | "v_pk_mul_f16" | "v_pk_fma_f16" | "v_pk_fmac_f16" | "v_fma_mixlo_f16" | "v_fma_mixhi_f16"
         );
         let f64_ops = matches!(m, "v_add_f64" | "v_mul_f64" | "v_fma_f64" | "v_ldexp_f64" | "v_div_fmas_f64");
@@ -564,16 +563,16 @@ impl Emitter<'_> {
             }
             "v_cvt_f16_i16" => format!("tb_h_cvt((double)(asint(({}) << 16) >> 16), tb_hw1, 0u)", r(&s[0])?),
             "v_cvt_f16_u16" => format!("tb_h_cvt((double)(({}) & 0xffffu), tb_hw1, 0u)", r(&s[0])?),
-            "v_mac_f16" => {
+            "v_fmac_f16" => {
                 self.touch(&d);
                 let hi = matches!(self.d16, Some((_, true)));
                 let acc = format!("tb_hin(f16tof32(({}){}), tb_hw1)", r(&d)?, if hi { " >> 16" } else { " & 0xffffu" });
-                format!("tb_h_mad({}, {}, {acc}, tb_hw1)", h(self, 0)?, h(self, 1)?)
+                format!("tb_h_fma({}, {}, {acc}, tb_hw1)", h(self, 0)?, h(self, 1)?)
             }
-            "v_madmk_f16" | "v_madak_f16" => {
+            "v_fmamk_f16" | "v_fmaak_f16" => {
                 let k = format!("tb_hin(f16tof32({:#x}u), tb_hw1)", ins.raw.last().copied().unwrap_or(0) & 0xffff);
                 let (a, b) = (h(self, 0)?, h(self, 1)?);
-                if m == "v_madak_f16" { format!("tb_h_mad({a}, {b}, {k}, tb_hw1)") } else { format!("tb_h_mad({a}, {k}, {b}, tb_hw1)") }
+                if m == "v_fmaak_f16" { format!("tb_h_fma({a}, {b}, {k}, tb_hw1)") } else { format!("tb_h_fma({a}, {k}, {b}, tb_hw1)") }
             }
             "v_fma_mixlo_f16" | "v_fma_mixhi_f16" => {
                 let v = self.mix_vals(ins)?;

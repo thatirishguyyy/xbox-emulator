@@ -301,6 +301,7 @@ unsafe extern "system" fn reset_x(this: *mut c_void, alloc: *mut c_void, pso: *m
     }
     with_list(this as usize, |s| *s = ListState { pso: pso as usize, ..ListState::default() });
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) -> i32 = core::mem::transmute(REAL_RESET.load(Ordering::Relaxed));
+    crate::ecl_probe::on_reset(this);
     f(this, alloc, pso)
 }
 

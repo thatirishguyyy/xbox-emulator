@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 pub mod access;
 pub mod basic;
+pub mod emureg;
 pub mod capture;
 pub mod events;
 pub mod fs;

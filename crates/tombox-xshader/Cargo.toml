@@ -3,7 +3,7 @@ name = "tombox-xshader"
 version = "0.1.0"
 edition = "2021"
 description = "Extract and (eventually) translate Xbox Series shaders: DXBC -> DXIL/XDAT -> zlib -> FSSM -> RDNA2 ISA."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "tombox_xshader"

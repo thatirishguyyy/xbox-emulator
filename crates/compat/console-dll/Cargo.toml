@@ -3,7 +3,7 @@ name = "console-dll"
 version = "0.1.0"
 edition = "2021"
 description = "Locates and loads an Xbox console system DLL on PC for forwarding: env override, renamed side-by-side copy, or the newest copy in a title EmbeddedXvd dump (read-only), with emulator compat modules preloaded in place of console-only imports."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "console_dll"

@@ -165,11 +165,42 @@ fn mark(d: &mut Dcc, buf: usize, k: u32, u: bool) {
     d.w8(o, if u { v | 1 << k } else { v & !(1u8 << k) });
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FEED: std::cell::RefCell<Option<[std::collections::VecDeque<[u8; 64]>; 4]>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static SITE: std::cell::Cell<usize> = const { std::cell::Cell::new(9) };
+}
+
+#[cfg(test)]
+fn fed() -> Option<[u8; 64]> {
+    let site = SITE.with(|s| s.replace(9));
+    FEED.with(|f| f.borrow_mut().as_mut().and_then(|q| q.get_mut(site).map(|q| q.pop_front().unwrap_or([0; 64]))))
+}
+
+#[cfg(not(test))]
+fn fed() -> Option<[u8; 64]> {
+    None
+}
+
+#[cfg(test)]
+fn site(k: usize) {
+    SITE.with(|s| s.set(k));
+}
+
+#[cfg(not(test))]
+fn site(_: usize) {}
+
 pub(crate) fn remap(d: &mut Dcc, dst: usize, src: usize, maps: &[Option<(u32, u32)>; 4]) -> Result<(), i32> {
     let meta = d.r32(0x58);
     let s = d.b[src];
     let mut tmp = [0u8; 64];
     let mut ever = [false; 64];
+    if maps.iter().any(|m| m.is_some()) {
+        if let Some(b) = fed() {
+            tmp = b;
+            ever = [true; 64];
+        }
+    }
     for k in 0..4u32 {
         if !bt(d.r32(0x5c), k) {
             continue;
@@ -203,6 +234,12 @@ pub(crate) fn remap(d: &mut Dcc, dst: usize, src: usize, maps: &[Option<(u32, u3
 
 pub(crate) fn relay(d: &mut Dcc, dst: usize, src: usize, mode: u32) -> Result<(), i32> {
     let from = d.r32(0xf0);
+    site(match mode {
+        2 => 1,
+        1 => 2,
+        0 => 3,
+        _ => 9,
+    });
     remap(d, dst, src, &[Some((from, mode)); 4])?;
     d.w32(0xf0, mode);
     Ok(())
@@ -483,6 +520,7 @@ fn tid_body(d: &mut Dcc, meta: u32) -> Result<(), i32> {
             maps[k] = Some((gm[k], 3));
         }
     }
+    site(0);
     remap(d, 2, 2, &maps)?;
     for q in 0..8u32 {
         if !seg_bit(d, q >> 1)? || !differ(meta, 32 * q)? {

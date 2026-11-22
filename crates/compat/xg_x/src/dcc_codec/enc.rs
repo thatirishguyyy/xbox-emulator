@@ -436,7 +436,8 @@ fn obj_byte(d: &Dcc, off: usize) -> R<u8> {
 
 fn s1(d: &mut Dcc, at: u32, v: u8) -> R<()> {
     if at >= 256 {
-        return Err(Stop::Undef("the packed stream overruns the console's 256-byte heap output surface; whether the console then crashes depends on what the heap holds next to it"));
+        d.spill.push((at - 256, v));
+        return Ok(());
     }
     d.s[1][at as usize] = v;
     Ok(())
@@ -627,7 +628,18 @@ pub(crate) fn pack(d: &mut Dcc) -> R<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn run_checked(d: &mut Dcc) -> R<()> {
+    run(d)?;
+    if d.spill.is_empty() {
+        Ok(())
+    } else {
+        Err(Stop::Undef(super::run::OVERRUN))
+    }
+}
+
 pub(crate) fn run(d: &mut Dcc) -> R<()> {
+    d.spill.clear();
     d.o[0x418..0x420].fill(0);
     d.p(0xb0, 0);
     reorder_1dd10(d, 2, 0, 1);

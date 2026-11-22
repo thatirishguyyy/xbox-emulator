@@ -1,6 +1,7 @@
-param(
+﻿param(
   [switch]$DryRun,
   [switch]$SkipBuild,
+  [ValidateSet('release', 'dev-fast')][string]$Profile = 'release',
   [switch]$NoD3d12Debug,
   [string[]]$Only = @(),
   [int]$FortniteLobbySeconds = 900,
@@ -8,6 +9,12 @@ param(
   [int]$TrackmaniaSeconds = 600,
   [int]$XDefiantSeconds = 900,
   [int]$TerrariaSeconds = 600,
+  [int]$MinecraftSeconds = 600,
+  [int]$CaptureEvery = 60,
+  [int]$IdleSeconds = 120,
+  [string]$PadScript = '',
+  [string]$MinecraftGameArgs = '',
+  [string]$CompatDir = 'D:\TomBox\tools\dev\compat',
   [string]$Root = 'D:\TomBox',
   [string]$Report = 'D:\TomBox\tools\dev\batch_report.md',
   [string]$OutRoot = 'D:\TomBox\tools\dev\batch_runs',
@@ -37,13 +44,23 @@ $Titles = @(
     Saved = @('D:\xbox-pc-port\emulator\run\Mount\FortniteGame\Saved') },
   [pscustomobject]@{ Slug = 'trackmania'; Name = 'Trackmania'; Script = 'run_xone.ps1'; Args = @{ Title = 'Trackmania'; Drive = 'T:' };
     LogDir = (Join-Path $env:TEMP 'tombox-trackmania'); Proc = 'GbxGame'; Seconds = $TrackmaniaSeconds; Kind = 'generic'; Xone = $true;
-    Exe = ''; Saved = @('D:\xbox-pc-port\emulator\run-xone\Trackmania') },
+    Exe = ''; Saved = @('D:\xbox-pc-port\emulator\run-xone\Trackmania');
+    PadScreens = @(
+      @{ Name = 'start'; Ref = (Join-Path $PSScriptRoot 'screens\trackmania_start.png'); X = 840; Y = 795; W = 250; H = 60; CapW = 1920; CapH = 1080; Min = 0.8 },
+      @{ Name = 'play'; Ref = (Join-Path $PSScriptRoot 'screens\trackmania_menu_play.png'); X = 250; Y = 262; W = 140; H = 50; CapW = 1920; CapH = 1080; Min = 0.8 },
+      @{ Name = 'solo'; Ref = (Join-Path $PSScriptRoot 'screens\trackmania_solo_training.png'); X = 195; Y = 630; W = 205; H = 42; CapW = 1920; CapH = 1080; Hi = 180; Min = 0.8 });
+    PadScript = "5:connect;#start+2:press a;#play+3:press a;#solo+3:press down;+2:press left;+2:press a;+6:press a;+4:press a;/init challenge 'Training - 01'/+25:press a;+3:press a;+2:down rt+a;+10:stick l 0.5 0 800;+6:stick l -0.5 0 800" },
   [pscustomobject]@{ Slug = 'xdefiant'; Name = 'XDefiant'; Script = 'run_xdefiant.ps1'; Args = @{ Drive = 'Z:' };
     LogDir = (Join-Path $env:TEMP 'tombox-xdefiant'); Proc = 'Rogue_scarlett_rtx'; Seconds = $XDefiantSeconds; Kind = 'generic'; Xone = $false;
     Exe = 'D:\xbox-pc-port\games\XDefiant\extracted\Mount\Rogue_scarlett_rtx.exe'; Saved = @('D:\xbox-pc-port\emulator\run-xdefiant') },
   [pscustomobject]@{ Slug = 'terraria'; Name = 'Terraria'; Script = 'run_xone.ps1'; Args = @{ Title = 'Terraria'; Drive = 'U:' };
     LogDir = (Join-Path $env:TEMP 'tombox-terraria'); Proc = 'Terraria'; Seconds = $TerrariaSeconds; Kind = 'generic'; Xone = $true;
-    Exe = ''; Saved = @('D:\xbox-pc-port\emulator\run-xone\Terraria') }
+    Exe = ''; Saved = @('D:\xbox-pc-port\emulator\run-xone\Terraria');
+    Screens = @(@{ Milestone = 'menu / lobby'; Label = 'menu version line'; Ref = (Join-Path $PSScriptRoot 'screens\terraria_menu_version.png'); X = 12; Y = 1034; W = 256; H = 36; CapW = 1920; CapH = 1080; Min = 0.8 }) },
+  [pscustomobject]@{ Slug = 'minecraft'; Name = 'Minecraft Preview'; Script = 'run_minecraft.ps1'; Args = @{ Drive = 'M:' };
+    LogDir = (Join-Path $env:TEMP 'tombox-minecraft'); Proc = 'Minecraft.Windows'; Seconds = $MinecraftSeconds; Kind = 'generic'; Xone = $false; DbgArgs = $true;
+    Exe = 'D:\xbox-pc-port\games\Microsoft.MinecraftBeta_1.18.3064.0_neutral__8wekyb3d8bbwe_xs-PATCHED\Microsoft.MinecraftBeta_1.18.3064.0_neutral__8wekyb3d8bbwe_xs\Minecraft.Windows.exe'
+    Saved = @('D:\xbox-pc-port\emulator\run-minecraft') }
 )
 if ($Only.Count) { $Titles = @($Titles | Where-Object { $Only -contains $_.Slug }) }
 foreach ($t in $Titles) {
@@ -248,6 +265,121 @@ public static class TbAudio {
 }
 '@ }
 
+if (-not ('TbIdle' -as [type])) { Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class TbIdle {
+  [StructLayout(LayoutKind.Sequential)] struct LII { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LII p);
+  [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+  public static double Seconds() { LII l = new LII(); l.cbSize = 8; if (!GetLastInputInfo(ref l)) return -1; return ((uint)GetTickCount64() - l.dwTime) / 1000.0; }
+}
+'@ }
+if (-not ('TbFrame' -as [type])) { Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+public static class TbFrame {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc p, IntPtr l);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint f);
+  [DllImport("user32.dll")] static extern bool IsHungAppWindow(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  public class Shot { public int W, H; public double Mean, Std; public int Distinct; public string Method; public bool Drawn; public string Verdict; }
+  static IntPtr Find(uint[] pids, out int w, out int h) {
+    var want = new HashSet<uint>(pids);
+    IntPtr best = IntPtr.Zero; long area = 0; int bw = 0, bh = 0;
+    EnumWindows((hw, l) => {
+      uint pid; GetWindowThreadProcessId(hw, out pid);
+      if (!want.Contains(pid) || !IsWindowVisible(hw) || IsIconic(hw)) return true;
+      RECT r; if (!GetClientRect(hw, out r)) return true;
+      int cw = r.R - r.L, ch = r.B - r.T;
+      if (cw < 64 || ch < 64) return true;
+      if ((long)cw * ch > area) { area = (long)cw * ch; best = hw; bw = cw; bh = ch; }
+      return true;
+    }, IntPtr.Zero);
+    w = bw; h = bh;
+    return best;
+  }
+  static void Stats(Bitmap b, Shot s) {
+    var d = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+    var px = new int[1];
+    var seen = new HashSet<int>();
+    double sum = 0, sq = 0; int n = 0;
+    for (int gy = 0; gy < 72; gy++) {
+      int y = (int)((gy + 0.5) * b.Height / 72);
+      for (int gx = 0; gx < 128; gx++) {
+        int x = (int)((gx + 0.5) * b.Width / 128);
+        Marshal.Copy(IntPtr.Add(d.Scan0, y * d.Stride + x * 4), px, 0, 1);
+        int c = px[0];
+        int r = (c >> 16) & 255, g = (c >> 8) & 255, bl = c & 255;
+        double lum = 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+        sum += lum; sq += lum * lum; n++;
+        seen.Add(((r >> 3) << 10) | ((g >> 3) << 5) | (bl >> 3));
+      }
+    }
+    b.UnlockBits(d);
+    s.Mean = sum / n; s.Std = Math.Sqrt(Math.Max(0, sq / n - s.Mean * s.Mean)); s.Distinct = seen.Count;
+    s.Drawn = s.Std >= 4 && s.Distinct >= 24;
+    s.Verdict = s.Mean < 3 && s.Std < 2 ? "black" : (s.Std < 2 || s.Distinct < 8 ? "uniform" : (!s.Drawn ? "nearly uniform" : (s.Mean < 18 ? "dark" : "drawn")));
+  }
+  static System.Threading.Tasks.Task pending;
+  public static Shot Capture(uint[] pids, string path) {
+    int w, h;
+    IntPtr hw = Find(pids, out w, out h);
+    if (hw == IntPtr.Zero) return null;
+    var s = new Shot { W = w, H = h };
+    var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+    if (pending != null && !pending.IsCompleted) { bmp.Dispose(); s.Method = "previous capture still blocked"; s.Verdict = "hung"; return s; }
+    bool ok = false;
+    var job = pending = System.Threading.Tasks.Task.Run(() => { using (var g = Graphics.FromImage(bmp)) { IntPtr dc = g.GetHdc(); ok = PrintWindow(hw, dc, 3); g.ReleaseHdc(dc); } });
+    if (!job.Wait(3000)) { s.Method = "PrintWindow timed out"; s.Verdict = "hung"; return s; }
+    s.Method = ok ? "PrintWindow" : "PrintWindow failed";
+    Stats(bmp, s);
+    bmp.Save(path, ImageFormat.Png);
+    bmp.Dispose();
+    return s;
+  }
+}
+'@ }
+
+function Invoke-FrameCapture($res, [uint32[]]$Pids, [double]$El, [string]$Tag) {
+  $png = Join-Path $res.Dir ("frame_{0:0000}s{1}.png" -f [int]$El, $Tag)
+  try { $s = [TbFrame]::Capture($Pids, $png) } catch { $res.Notes.Add("frame capture at +$([int]$El)s failed: $($_.Exception.Message)"); return }
+  if (-not $s) { $res.Frames.Add([pscustomobject]@{ T = [int]$El; Png = ''; W = 0; H = 0; Mean = 0; Std = 0; Distinct = 0; Drawn = $false; Verdict = 'no window'; Method = '' }); return }
+  if ($s.Verdict -eq 'hung') { $png = '' }
+  $res.Frames.Add([pscustomobject]@{ T = [int]$El; Png = $png; W = $s.W; H = $s.H; Mean = [Math]::Round($s.Mean, 1); Std = [Math]::Round($s.Std, 1); Distinct = $s.Distinct; Drawn = $s.Drawn; Verdict = $s.Verdict; Method = $s.Method })
+  Say ("  +{0:N0}s frame {1}x{2} mean {3:N1} std {4:N1} colours {5}: {6}" -f $El, $s.W, $s.H, $s.Mean, $s.Std, $s.Distinct, $s.Verdict) $(if ($s.Drawn) { 'Green' } else { 'Yellow' })
+  if ($s.Drawn) { Test-FrameScreens $res $png $El }
+}
+
+. (Join-Path $PSScriptRoot 'frame_sig.ps1')
+
+function Get-DumpRoot($t) {
+  if (-not $t.Exe) { return '' }
+  $i = $t.Exe.IndexOf('\extracted', [StringComparison]::OrdinalIgnoreCase)
+  if ($i -gt 0) { return $t.Exe.Substring(0, $i + 10) }
+  return (Split-Path $t.Exe -Parent)
+}
+
+function Get-DumpSnapshot([string]$Dir) {
+  $h = @{}
+  if (-not $Dir -or -not (Test-Path -LiteralPath $Dir)) { return $h }
+  foreach ($f in [IO.Directory]::EnumerateFiles($Dir, '*', [IO.SearchOption]::AllDirectories)) {
+    $fi = New-Object IO.FileInfo $f
+    $h[$f] = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+  }
+  return $h
+}
+
 function Get-Tree([int]$RootPid) {
   $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name)
   $set = New-Object System.Collections.Generic.List[int]
@@ -303,6 +435,10 @@ function Set-BatchEnv {
   Remove-Item Env:TOMBOX_ALLOW_NETWORK, Env:TOMBOX_NET_LOCAL_PORT -ErrorAction SilentlyContinue
   $env:TOMBOX_NET_REDIRECT = '127.0.0.1'
   $env:TOMBOX_NET_BACKEND = 'builtin'
+  $env:TOMBOX_HOST_PAD = '0'
+  $env:TOMBOX_TEST_RUN = '1'
+  $env:TOMBOX_HOST_KBM = '0'
+  $env:TOMBOX_PRELAUNCH_UI = '0'
   $env:TOMBOX_FN_GAMESERVER = '127.0.0.1:7777'
   if ($DbgLayer) {
     $env:TOMBOX_D3D12_DEBUG = '1'
@@ -316,7 +452,10 @@ function Set-BatchEnv {
 function Get-ArgList($t, [switch]$Dry) {
   $a = @('-NoProfile', '-File', (Join-Path $Root $t.Script))
   foreach ($k in $t.Args.Keys) { $a += "-$k"; $a += "$($t.Args[$k])" }
-  if ($t.Xone -and $DbgLayer) { $a += '-Agility'; $a += $Agility; $a += '-AgilityVersion'; $a += "$AgilityVersion"; $a += '-D3d12Debug' }
+  if ($t.Xone) { $a += '-XoneTarget'; $a += (Join-Path $Root 'target\release') }
+  if ($Profile -ne 'release') { $a += '-Profile'; $a += $Profile }
+  if (($t.Xone -or $t.DbgArgs) -and $DbgLayer) { $a += '-Agility'; $a += $Agility; $a += '-AgilityVersion'; $a += "$AgilityVersion"; $a += '-D3d12Debug' }
+  if ($t.Slug -eq 'minecraft' -and $MinecraftGameArgs) { $a += '-GameArgs'; $a += ('"' + $MinecraftGameArgs.Trim() + '"') }
   if ($Dry) { $a += '-DryRun' } else { $a += '-Seconds'; $a += "$($t.Seconds + 120)" }
   return $a
 }
@@ -342,7 +481,15 @@ try { $seen = New-Object System.Collections.Generic.List[string]; $r = [TbAudio]
 catch { $pre.Add("audio mute unavailable: $($_.Exception.Message) (titles would be audible; pass aborted)") }
 
 $build = 'skipped (-SkipBuild)'
-if (-not $SkipBuild) {
+if (-not $SkipBuild -and $Profile -eq 'dev-fast') {
+  Say 'quick.ps1 -NoStage (dev-fast incremental build of changed DLL crates)' 'Cyan'
+  $bl = Join-Path $RunRoot 'quick_build.txt'
+  & powershell.exe -NoProfile -File (Join-Path $Root 'tools\dev\quick.ps1') -NoStage *> $bl
+  $bcode = $LASTEXITCODE
+  $btxt = Get-Content $bl
+  $btxt | ForEach-Object { Say "  $_" 'DarkGray' }
+  $build = "dev-fast exit $bcode; " + (($btxt | Where-Object { $_ -match 'quick done|cargo exit|error' }) -join '; ')
+} elseif (-not $SkipBuild) {
   Say 'rebuild_release.ps1 (cargo build --release -j 6)' 'Cyan'
   $bl = Join-Path $RunRoot 'rebuild_release.txt'
   & powershell.exe -NoProfile -File (Join-Path $Root 'tools\dev\rebuild_release.ps1') *> $bl
@@ -357,7 +504,7 @@ foreach ($t in $Titles) {
   Say "=== $($t.Name)" 'Cyan'
   $dir = Join-Path $RunRoot $t.Slug
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  $res = [ordered]@{ Title = $t; Dir = $dir; Status = ''; Notes = (New-Object System.Collections.Generic.List[string]); Live = [ordered]@{}; Plan = @(); Net = $null; Exit = $null; Elapsed = 0; Dumps = @(); Analysis = $null; Tail = @() }
+  $res = [ordered]@{ Title = $t; Dir = $dir; Status = ''; Notes = (New-Object System.Collections.Generic.List[string]); Live = [ordered]@{}; Plan = @(); Net = $null; Exit = $null; Elapsed = 0; Dumps = @(); Analysis = $null; Tail = @(); Frames = (New-Object System.Collections.Generic.List[object]); Compat = $null }
   $script = Join-Path $Root $t.Script
   $res.Net = Test-ScriptNetwork $script
   if ($res.Net.Hits.Count) { $res.Notes.Add("run script references external hosts/addresses: $($res.Net.Hits -join ', ')") }
@@ -401,7 +548,62 @@ foreach ($t in $Titles) {
   }
 
   foreach ($f in Get-SourceFiles $t.LogDir) { if ($f.Src -ne 'launcher') { Remove-Item -LiteralPath $f.Path -Force -ErrorAction SilentlyContinue } }
+  $userPlaying = 'D:\TomBox\tools\dev\batch_runs\USER_PLAYING'
+  $titleProcs = '^(Terraria|GbxGame|XDefiant|Minecraft|FortniteClient|Rogue_scarlett)'
+  $userWaitSaid = $false
+  $idleWaitSaid = $false
+  while ($true) {
+    if (Test-Path -LiteralPath $userPlaying) {
+      $txt = try { Get-Content -LiteralPath $userPlaying -Raw -ErrorAction Stop } catch { '' }
+      $pids = @([regex]::Matches([string]$txt, '(?:script|game)_pid=(\d+)') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -gt 0 })
+      $alive = @($pids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+      if (-not $alive.Count) { Remove-Item -LiteralPath $userPlaying -Force -ErrorAction SilentlyContinue; Say "  removed stale USER_PLAYING (no live pid among: $($pids -join ','))" 'DarkGray' }
+    }
+    $idle = [TbIdle]::Seconds()
+    $busy = (Test-Path -LiteralPath $userPlaying) -or (Get-Process | Where-Object { $_.Name -match $titleProcs })
+    if (-not $busy -and ($idle -lt 0 -or $idle -ge $IdleSeconds)) { break }
+    if (-not $busy -and -not $idleWaitSaid) { Say ("  waiting: the user touched keyboard/mouse/pad {0:N0}s ago; the test starts after {1}s with no input" -f $idle, $IdleSeconds) 'Yellow'; $idleWaitSaid = $true }
+    if ($busy -and -not $userWaitSaid) { Say '  waiting: the user is playing (USER_PLAYING exists or a title is running); the test starts when they stop' 'Yellow'; $userWaitSaid = $true }
+    Start-Sleep -Seconds 10
+  }
+  $lock = 'D:\TomBox\tools\dev\batch_runs\GAME_LOCK'
+  $lockWait = (Get-Date).AddMinutes(30)
+  while ($true) {
+    try { $fs = [IO.File]::Open($lock, 'CreateNew', 'Write', 'None'); $b = [Text.Encoding]::UTF8.GetBytes("batch_test $($t.Slug) $(Get-Date -Format s)"); $fs.Write($b, 0, $b.Length); $fs.Close(); break } catch {}
+    if ((Get-Date) -gt $lockWait) { break }
+    Start-Sleep -Seconds 5
+  }
+  $dumpRoot = Get-DumpRoot $t
+  $snap = Get-DumpSnapshot $dumpRoot
+  Say "  dump snapshot: $($snap.Count) files under $dumpRoot" 'DarkGray'
+  $netOk = $false
+  $padDir = Join-Path $t.LogDir 'pad'
+  $splashAt = $null
+  $splashPresses = 0
+  $splashDone = $false
+  $padQueue = New-Object System.Collections.ArrayList
+  $padOrdered = $false
+  $padText = if ($PadScript) { $PadScript } elseif ($t.PSObject.Properties['PadScript']) { $t.PadScript } else { '' }
+  if ($padText -and -not $PadScript) { $res.Notes.Add("PadScript: title default '$padText'") }
+  foreach ($e in ($padText -split ';')) {
+    if ($e -match '^\s*(\d+(?:\.\d+)?)\s*:\s*(.+?)\s*$') { [void]$padQueue.Add([pscustomobject]@{ At = [double]$Matches[1]; Cmd = $Matches[2]; Gate = ''; Rx = $null; Screen = ''; Delay = 0.0 }) }
+    elseif ($e -match '^\s*/(.+?)/\+?(\d+(?:\.\d+)?)\s*:\s*(.+?)\s*$') { $padOrdered = $true; [void]$padQueue.Add([pscustomobject]@{ At = $null; Cmd = $Matches[3]; Gate = "log /$($Matches[1])/"; Rx = [regex]$Matches[1]; Screen = ''; Delay = [double]$Matches[2] }) }
+    elseif ($e -match '^\s*#([a-z0-9_]+)\+?(\d+(?:\.\d+)?)\s*:\s*(.+?)\s*$') { $padOrdered = $true; [void]$padQueue.Add([pscustomobject]@{ At = $null; Cmd = $Matches[3]; Gate = "screen $($Matches[1])"; Rx = $null; Screen = $Matches[1]; Delay = [double]$Matches[2] }) }
+    elseif ($e -match '^\s*\+(\d+(?:\.\d+)?)\s*:\s*(.+?)\s*$') { $padOrdered = $true; [void]$padQueue.Add([pscustomobject]@{ At = $null; Cmd = $Matches[2]; Gate = 'previous step'; Rx = $null; Screen = ''; Delay = [double]$Matches[1] }) }
+    elseif ($e.Trim()) { $res.Notes.Add("PadScript entry ignored (not 'sec:cmd', '/regex/+sec:cmd', '#screen+sec:cmd' or '+sec:cmd'): $e") }
+  }
+  if (-not $padOrdered) { $padQueue = [System.Collections.ArrayList]@($padQueue | Sort-Object At) }
+  $padGatePng = Join-Path $dir 'pad_gate.png'
+  $nextGate = 0.0
+  $padLastFire = 0.0
+  $padLines = New-Object System.Collections.Generic.List[string]
+  $padRx = @($padQueue | Where-Object { $_.Rx }).Count -gt 0
   $launcher = Join-Path $dir 'launcher.txt'
+  $takeFile = Join-Path $dir 'TAKEN_OVER'
+  Remove-Item -LiteralPath $takeFile -Force -ErrorAction SilentlyContinue
+  $env:TOMBOX_TAKEOVER_FILE = $takeFile
+  $env:TOMBOX_USER_PLAYING_FILE = $userPlaying
+  $takenOver = $false
   $start = Get-Date
   $ps = Start-Process -FilePath 'powershell.exe' -ArgumentList $la -RedirectStandardOutput $launcher -RedirectStandardError (Join-Path $dir 'launcher.err.txt') -WindowStyle Hidden -PassThru
   $streams = @(foreach ($f in Get-SourceFiles $t.LogDir) { if ($f.Src -ne 'launcher') { [pscustomobject]@{ Src = $f.Src; Path = $f.Path; Pos = 0L; Rest = '' } } })
@@ -413,6 +615,7 @@ foreach ($t in $Titles) {
   $tree = Get-Tree $ps.Id
   $nextLog = $start
   $nextTree = $start
+  $nextShot = 20
   while ($true) {
     $el = ((Get-Date) - $start).TotalSeconds
     Start-Sleep -Milliseconds $(if ($el -lt 120) { 100 } else { 500 })
@@ -422,21 +625,68 @@ foreach ($t in $Titles) {
     try { $mh = [TbAudio]::Sessions([uint32[]]$pids, $true, $null); if ($mh -gt 0 -and -not $muted) { $muted = $true; Say ("  +{0:N1}s audio session muted (original state saved)" -f $el) } } catch {}
     if ((Get-Date) -lt $nextLog) { $ps.Refresh(); if ($ps.HasExited) { break }; continue }
     $nextLog = (Get-Date).AddMilliseconds(500)
+    if (-not $takenOver -and (Test-Path -LiteralPath $takeFile)) {
+      $takenOver = $true
+      $why = try { (Get-Content -LiteralPath $takeFile -Raw -ErrorAction Stop).Trim() } catch { '' }
+      $padQueue.Clear(); $splashPresses = 99
+      $res.Notes.Add("taken over by user at +$([int]$el)s ($why): pad script stopped, host pad/keyboard/mouse unhidden, no time limit; the run is the user's play session")
+      Say ("  +{0:N0}s TAKEN OVER BY USER ({1}); pad script stopped, waiting for the user to close the game" -f $el, $why) 'Magenta'
+    }
     foreach ($s in $streams) {
       foreach ($l in Read-New $s) {
         foreach ($m in $MilestoneDefs[$t.Kind]) {
           if ($res.Live.Contains($m.Name)) { continue }
           if (($m.Src -eq 'any' -or $m.Src -eq $s.Src) -and $m.Rx.IsMatch($l)) { $res.Live[$m.Name] = [Math]::Round($el, 1); Say ("  +{0:N0}s milestone: {1}" -f $el, $m.Name) 'Green' }
         }
+        if ($s.Src -eq 'ods' -and $t.Kind -eq 'fortnite' -and -not $splashDone) {
+          if ($l -match 'Setting user focus to widget Splash_Screen' -and -not $splashAt) { $splashAt = $el }
+          if ($l -match 'CloseSplashScreen|Auto-login attempt started') { $splashDone = $true; Say ("  +{0:N0}s splash closed" -f $el) 'Green' }
+        }
+        if ($padRx -and $padLines.Count -lt 20000) { [void]$padLines.Add($l) }
         if ($s.Src -eq 'ods') { $u = $UiRx.Match($l); if ($u.Success) { Say ("  +{0:N0}s UI State {1} -> {2}" -f $el, $u.Groups[1].Value, $u.Groups[2].Value) 'Green' } }
-        if ($s.Src -eq 'compat') { $fm = $FpsRx.Match($l); if ($fm.Success) { $lastFps = $fm.Groups[1].Value } }
+        if ($s.Src -eq 'compat') { $fm = $FpsRx.Match($l); if ($fm.Success) { $lastFps = $fm.Groups[1].Value }; if (-not $netOk -and $l -match '\[net_guard\] installed') { $netOk = $true; Say ("  +{0:N0}s network guard installed" -f $el) 'Green' } }
         if ($s.Src -eq 'trace' -and $l -match 'firstChance=0|ACCESS_VIOLATION|EXIT_PROCESS|\[HANG\]|too many exceptions') { Say ("  +{0:N0}s {1}" -f $el, $l.Trim()) 'Yellow' }
       }
     }
     if (((Get-Date) - $lastBeat).TotalSeconds -ge 60) { $lastBeat = Get-Date; Say ("  +{0:N0}s running; fps {1}; muted {2}" -f $el, $(if ($lastFps) { $lastFps } else { '-' }), $muted) 'DarkGray' }
+    if (-not $netOk -and $el -ge 45) { $res.Notes.Add("network guard not installed after $([int]$el)s: run stopped to keep the title offline"); Say '  network guard missing: stopping the run' 'Red'; $timedOut = $true; break }
+    if ($splashAt -and -not $splashDone -and $splashPresses -lt 6 -and $el -ge $splashAt + 3 + 15 * $splashPresses) {
+      New-Item -ItemType Directory -Force -Path $padDir | Out-Null
+      $pn = '{0:D20}_batch' -f [DateTime]::UtcNow.Ticks
+      [IO.File]::WriteAllText((Join-Path $padDir "$pn.tmp"), "press a`n", (New-Object Text.UTF8Encoding $false))
+      Move-Item -LiteralPath (Join-Path $padDir "$pn.tmp") -Destination (Join-Path $padDir "$pn.cmd")
+      $splashPresses++
+      $res.Notes.Add("virtual gamepad: 'press a' queued at +$([int]$el)s to close the splash screen (no mouse or keyboard input)")
+      Say ("  +{0:N0}s virtual pad: press A on the splash screen" -f $el) 'DarkGray'
+    }
+    if ($padQueue.Count -gt 0 -and $null -eq $padQueue[0].At -and $padQueue[0].Gate -eq 'previous step') { $padQueue[0].At = $padLastFire + $padQueue[0].Delay }
+    if ($padQueue.Count -gt 0 -and $null -eq $padQueue[0].At -and $padQueue[0].Rx -and $padLines.Count -gt 0) {
+      $hit = -1
+      for ($i = 0; $i -lt $padLines.Count; $i++) { if ($padQueue[0].Rx.IsMatch($padLines[$i])) { $hit = $i; break } }
+      if ($hit -ge 0) { $padLines.RemoveRange(0, $hit + 1); $padQueue[0].At = $el + $padQueue[0].Delay; Say ("  +{0:N0}s pad gate {1} matched" -f $el, $padQueue[0].Gate) 'DarkGray' } else { $padLines.Clear() }
+    }
+    if ($padQueue.Count -gt 0 -and $null -eq $padQueue[0].At -and $padQueue[0].Screen -and $el -ge $nextGate) {
+      $nextGate = $el + 2
+      $sv = Test-PadScreen $t $padQueue[0].Screen ([uint32[]]$pids) $padGatePng
+      $sd = $t.PadScreens | Where-Object { $_.Name -eq $padQueue[0].Screen } | Select-Object -First 1
+      if ($null -ne $sv -and $sd -and $sv -ge $sd.Min) { $padQueue[0].At = $el + $padQueue[0].Delay; Say ("  +{0:N0}s pad gate {1} on screen (score {2:N2})" -f $el, $padQueue[0].Gate, $sv) 'DarkGray' }
+    }
+    while ($padQueue.Count -gt 0 -and $null -ne $padQueue[0].At -and $el -ge $padQueue[0].At) {
+      $pc = $padQueue[0]; $padQueue.RemoveAt(0); $padLastFire = $el
+      if ($padQueue.Count -gt 0 -and $null -eq $padQueue[0].At -and $padQueue[0].Gate -eq 'previous step') { $padQueue[0].At = $el + $padQueue[0].Delay }
+      $gpDir = Join-Path $env:TEMP 'tombox\pad'
+      New-Item -ItemType Directory -Force -Path $gpDir | Out-Null
+      $pn = '{0:D20}_script' -f [DateTime]::UtcNow.Ticks
+      [IO.File]::WriteAllText((Join-Path $gpDir "$pn.tmp"), "$($pc.Cmd)`n", (New-Object Text.UTF8Encoding $false))
+      Move-Item -LiteralPath (Join-Path $gpDir "$pn.tmp") -Destination (Join-Path $gpDir "$pn.cmd")
+      $res.Notes.Add("virtual gamepad: '$($pc.Cmd)' queued at +$([int]$el)s (PadScript$(if ($pc.Gate) { ", after $($pc.Gate)" }))")
+      Say ("  +{0:N0}s virtual pad: {1}" -f $el, $pc.Cmd) 'DarkGray'
+      Invoke-FrameCapture $res ([uint32[]]$pids) $el ('_pre' + ($pc.Cmd -replace '[^a-z0-9]', ''))
+    }
+    if (-not $takenOver -and $el -ge $nextShot) { Invoke-FrameCapture $res ([uint32[]]$pids) $el ''; $nextShot = if ($nextShot -lt 45) { 45 } else { $nextShot + $CaptureEvery } }
     $ps.Refresh()
     if ($ps.HasExited) { break }
-    if ($el -ge $t.Seconds) { $timedOut = $true; break }
+    if (-not $takenOver -and $el -ge $t.Seconds) { $timedOut = $true; Invoke-FrameCapture $res ([uint32[]]$pids) $el '_final'; break }
   }
   $res.Elapsed = [Math]::Round(((Get-Date) - $start).TotalSeconds, 1)
   if ($timedOut) {
@@ -447,6 +697,10 @@ foreach ($t in $Titles) {
     foreach ($g in $left) { try { Stop-Process -Id $g.Id -Force } catch {} }
   }
   Start-Sleep -Seconds 2
+  Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+  $after = Get-DumpSnapshot $dumpRoot
+  $changed = @($after.Keys | Where-Object { -not $snap.ContainsKey($_) -or $snap[$_] -ne $after[$_] }) + @($snap.Keys | Where-Object { -not $after.ContainsKey($_) })
+  if ($changed.Count) { $res.Notes.Add("DUMP MODIFIED: $($changed.Count) file(s) under $dumpRoot changed during the run: $(($changed | Select-Object -First 10) -join ', ')"); Say "  DUMP MODIFIED: $($changed.Count) files" 'Red' } else { $res.Notes.Add("dump unchanged ($($after.Count) files under $dumpRoot)") }
   try { foreach ($m in [TbAudio]::Restore()) { $res.Notes.Add("audio: $m") } } catch { $res.Notes.Add("audio: restoring mute state failed: $($_.Exception.Message)") }
   if (-not $muted) { $res.Notes.Add('audio: no audio session of the run was seen, nothing muted or restored') }
   foreach ($f in Get-SourceFiles $t.LogDir) { if ($f.Src -ne 'launcher' -and (Test-Path -LiteralPath $f.Path)) { Copy-Item -LiteralPath $f.Path $dir -Force } }
@@ -454,11 +708,12 @@ foreach ($t in $Titles) {
   $res.Dumps = @(foreach ($d in $dumpDirs) { if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Recurse -File -Include *.dmp, *.mdmp -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $start } } })
   foreach ($d in $res.Dumps) { Copy-Item -LiteralPath $d.FullName $dir -Force }
   $res.Analysis = Invoke-Analyze $dir $t.Kind
+  Merge-FrameMilestones $res
   $res.Exit = $res.Analysis.Exit
   $compat = Join-Path $dir 'tombox_compat.log'
   if (Test-Path $compat) { $res.Tail = @(Get-Content $compat -Tail 40) }
   $crashed = $res.Exit -and $res.Exit -notmatch '^0 '
-  $res.Status = if ($timedOut) { if ($crashed) { 'timeout (title exit code set)' } else { 'ran to timeout' } } elseif ($crashed) { "crashed (exit $($res.Exit))" } elseif ($res.Exit) { "exited (exit $($res.Exit))" } else { 'ended without an exit record' }
+  $res.Status = if ($takenOver) { 'taken over by user' } elseif ($timedOut) { if ($crashed) { 'timeout (title exit code set)' } else { 'ran to timeout' } } elseif ($crashed) { "crashed (exit $($res.Exit))" } elseif ($res.Exit) { "exited (exit $($res.Exit))" } else { 'ended without an exit record' }
   Say "  result: $($res.Status) after $($res.Elapsed)s" $(if ($crashed) { 'Red' } else { 'Cyan' })
   $results += [pscustomobject]$res
 }
@@ -466,19 +721,31 @@ foreach ($t in $Titles) {
 foreach ($v in $oldEnv.Keys) { [Environment]::SetEnvironmentVariable($v, $oldEnv[$v]) }
 try { if ([TbAudio]::HeldCount) { foreach ($m in [TbAudio]::Restore()) { Say "audio: $m" } } } catch {}
 
+. (Join-Path $PSScriptRoot 'compat_list.ps1')
+$BuildStamp = Get-BuildStamp $Root
+Remove-Item Env:TOMBOX_TAKEOVER_FILE, Env:TOMBOX_USER_PLAYING_FILE -ErrorAction SilentlyContinue
+if ($DryRun) { $CompatDir = Join-Path $RunRoot 'compat' }
+if ($true) {
+  $entries = [ordered]@{}
+  foreach ($r in $results) { if ($r.Analysis -or $r.Frames.Count) { $r.Compat = Get-CompatEntry $r $BuildStamp $Root $Stamp; $entries[$r.Title.Slug] = $r.Compat } }
+  if ($entries.Count) { try { Update-CompatList $CompatDir $entries $Titles; Say "compat list: $CompatDir" 'Cyan' } catch { Say "compat list update failed: $($_.Exception.Message)" 'Red' } }
+}
+
 W "# Batch test report"
 W
 W "- Mode: **$Mode**"
 W "- Started: $($BatchStart.ToString('yyyy-MM-dd HH:mm:ss')), finished: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 W "- Run folder: ``$RunRoot`` (all copied logs, stage plans, dumps)"
-W "- Release build: $(ConvertTo-MdText $build)"
+W "- Build ($Profile): $(ConvertTo-MdText $build)"
 W "- Network: forced offline/private (TOMBOX_NET_REDIRECT=127.0.0.1, TOMBOX_NET_BACKEND=builtin, TOMBOX_ALLOW_NETWORK removed, Fortnite game server 127.0.0.1:7777); enforced in-process by compat-common net_guard"
 W "- D3D12 debug layer: $(if ($DbgLayer) { "ON via Agility SDK $AgilityVersion ($Agility); FPS is measured with the layer on" } else { 'off (-NoD3d12Debug)' }). DRED: not enabled by any compat crate; only device-removal log lines are captured"
 W "- Audio: each title's WASAPI session is muted from the batch (polled every 0.1 s for the first 2 min, then 0.5 s; each session's prior mute state is restored after the title exits); input: none injected; windows: shown by the title"
 foreach ($p in $pre) { W "- **Preflight problem:** $(ConvertTo-MdText $p)" }
 W
-W "| Title | Result | Furthest milestone | FPS min/avg/max (last, p99 ms) | Exit | Defect groups |"
-W "|---|---|---|---|---|---|"
+W "- Build: $($BuildStamp.Stamp)"
+W
+W "| Title | Compat | Result | Furthest milestone | Frames drawn | FPS min/avg/max (last, p99 ms) | Exit | Defect groups |"
+W "|---|---|---|---|---|---|---|---|"
 foreach ($r in $results) {
   $a = $r.Analysis
   $order = @($MilestoneDefs[$r.Title.Kind] | ForEach-Object { $_.Name })
@@ -490,7 +757,9 @@ foreach ($r in $results) {
     if ($a.Fps.Count) { $st = $a.Fps | Measure-Object -Minimum -Maximum -Average; $fps = "{0:N1}/{1:N1}/{2:N1} ({3:N1}, {4})" -f $st.Minimum, $st.Average, $st.Maximum, $a.Fps[$a.Fps.Count - 1], $(if ($a.P99) { $a.P99 } else { '-' }) }
     foreach ($c in $a.Defects.Keys) { $groups += $a.Defects[$c].Count }
   }
-  W "| $(ConvertTo-MdText $r.Title.Name) | $(ConvertTo-MdText $r.Status) | $far | $fps | $(ConvertTo-MdText $(if ($r.Exit) { $r.Exit } else { '-' })) | $groups |"
+  $cs = if ($r.Compat) { $r.Compat.status } else { '-' }
+  $fd = if ($r.Compat) { if ($r.Compat.frames_drawn) { 'yes' } else { 'no' } } else { '-' }
+  W "| $(ConvertTo-MdText $r.Title.Name) | $cs | $(ConvertTo-MdText $r.Status) | $far | $fd | $fps | $(ConvertTo-MdText $(if ($r.Exit) { $r.Exit } else { '-' })) | $groups |"
 }
 W
 foreach ($r in $results) {
@@ -500,6 +769,11 @@ foreach ($r in $results) {
   W "- Status: $(ConvertTo-MdText $r.Status)$(if ($r.Elapsed) { " after $($r.Elapsed) s" })"
   W "- Launch: ``powershell.exe $((Get-ArgList $t | Select-Object -Skip 2) -join ' ')`` (timeout $($t.Seconds) s, window visible, no input)"
   W "- Logs: ``$($r.Dir)``"
+  if ($r.Compat) { W "- Compatibility: **$($r.Compat.status)**; furthest $($r.Compat.furthest); frames drawn $(if ($r.Compat.frames_drawn) { 'yes' } else { 'no' }); top issue: ``$(ConvertTo-MdText $r.Compat.top_issue)``" }
+  if ($r.Frames.Count) {
+    W "- Frame captures ($($r.Frames.Count)):"
+    foreach ($f in $r.Frames) { W ("  - +{0}s {1}: {2}x{3} mean {4} std {5} colours {6} via {7} ``{8}``" -f $f.T, $f.Verdict, $f.W, $f.H, $f.Mean, $f.Std, $f.Distinct, $f.Method, $f.Png) }
+  }
   foreach ($n in $r.Notes) { W "- $(ConvertTo-MdText $n)" }
   if ($r.Dumps.Count) { W "- Crash dumps: $(($r.Dumps | ForEach-Object { '`' + $_.Name + '`' }) -join ', ')" } elseif (-not $DryRun) { W '- Crash dumps: none written (mdbg does not write minidumps; none in CrashDumps or the title Saved folders)' }
   W

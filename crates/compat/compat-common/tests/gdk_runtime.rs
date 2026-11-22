@@ -168,7 +168,7 @@ fn sync_calls_through_query_api_impl() {
         let f: unsafe extern "system" fn(*mut c_void) -> bool = core::mem::transmute(f);
         assert!(f(o));
 
-        let (o, f) = method(gdk::user::CLSID, gdk::user::IID_V1, 13);
+        let (o, f) = method(gdk::user::CLSID, gdk::user::IID_V1, 15);
         let f: unsafe extern "system" fn(*mut c_void) -> i32 = core::mem::transmute(f);
         assert_eq!(f(o), gdk::E_NOTIMPL);
 

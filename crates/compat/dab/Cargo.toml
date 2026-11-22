@@ -3,7 +3,7 @@ name = "dab"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console dab.dll (Desktop Activity Broker): every console export forwarded to the PC broker staged beside it as dab_sys.dll, with the 10.0.19041 names DabPowerStateChanged / DabSessionStateChanged mapped to their renamed PC entry points."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

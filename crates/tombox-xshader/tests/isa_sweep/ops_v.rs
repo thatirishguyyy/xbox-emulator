@@ -134,20 +134,6 @@ fn hldexp(a: u32, b: u32) -> Option<u32> {
     }
     Some(d2h(ldexp64(h(a), e)))
 }
-fn hunfused(a: u32, b: u32, c: u32) -> Option<u32> {
-    if den16(a) || den16(b) || den16(c) {
-        return None;
-    }
-    let p = d2h(h(a) * h(b));
-    if den16(p) {
-        return None;
-    }
-    let r = d2h(h2d(p) + h(c));
-    if den16(r) {
-        return None;
-    }
-    Some(r)
-}
 pub fn hfma(a: u32, b: u32, c: u32) -> Option<u32> {
     let p = h(a) * h(b) + h(c);
     if (h(a) * h(b)).is_finite() && (p - h(a) * h(b) - h(c)) != 0.0 {
@@ -264,12 +250,12 @@ fn vop2_ops(s: &mut Suite) {
         let a = x.d[0] & 0xffff;
         on(hldexp(a, x.d[1].wrapping_sub(x.d[3])).map(|r| (x.d[2] & 0xffff_0000) | r))
     });
-    s.add("v_mac_f16", "VOP2", "e32", Class::F16, &[vmov(OUT, v(12))], &[vop2(0x36, OUT, v(10), 11)], &[], &[Cmp::F16(0)], |x| on(hunfused(x.d[0] & 0xffff, x.d[1] & 0xffff, x.d[2] & 0xffff).map(|r| (x.d[2] & 0xffff_0000) | r)));
+    s.add("v_fmac_f16", "VOP2", "e32", Class::F16, &[vmov(OUT, v(12))], &[vop2(0x36, OUT, v(10), 11)], &[], &[Cmp::F16(0)], |x| on(hfma(x.d[0] & 0xffff, x.d[1] & 0xffff, x.d[2] & 0xffff).map(|r| (x.d[2] & 0xffff_0000) | r)));
     let hk = [0x3e00u32, 0xc900, 0x0000, 0x7c00, 0x3555, 0x0200];
     for (i, &k) in hk.iter().enumerate() {
         let tag = format!("K={k:04x} #{i}");
-        s.add("v_madmk_f16", "VOP2", &tag, Class::F16, &[vmov(OUT, v(12))], &[vop2(0x37, OUT, v(10), 11), k], &[], &[Cmp::F16(0)], move |x| on(hunfused(x.d[0] & 0xffff, k, x.d[1] & 0xffff).map(|r| (x.d[2] & 0xffff_0000) | r)));
-        s.add("v_madak_f16", "VOP2", &tag, Class::F16, &[vmov(OUT, v(12))], &[vop2(0x38, OUT, v(10), 11), k], &[], &[Cmp::F16(0)], move |x| on(hunfused(x.d[0] & 0xffff, x.d[1] & 0xffff, k).map(|r| (x.d[2] & 0xffff_0000) | r)));
+        s.add("v_fmamk_f16", "VOP2", &tag, Class::F16, &[vmov(OUT, v(12))], &[vop2(0x37, OUT, v(10), 11), k], &[], &[Cmp::F16(0)], move |x| on(hfma(x.d[0] & 0xffff, k, x.d[1] & 0xffff).map(|r| (x.d[2] & 0xffff_0000) | r)));
+        s.add("v_fmaak_f16", "VOP2", &tag, Class::F16, &[vmov(OUT, v(12))], &[vop2(0x38, OUT, v(10), 11), k], &[], &[Cmp::F16(0)], move |x| on(hfma(x.d[0] & 0xffff, x.d[1] & 0xffff, k).map(|r| (x.d[2] & 0xffff_0000) | r)));
     }
     s.add("v_pk_fmac_f16", "VOP2", "e32", Class::F16, &[vmov(OUT, v(12))], &[vop2(0x3c, OUT, v(10), 11)], &[], &[Cmp::Pk16(0)], |x| {
         let lo = hfma(x.d[0], x.d[1], x.d[2]);

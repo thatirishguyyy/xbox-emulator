@@ -4,8 +4,8 @@
 2537 CallWindowProcA forwarded | PE forwarder to user32.CallWindowProcW; console CallWindowProcA is a jmp to (or alias of) CallWindowProcW with no ANSI conversion
 2538 CallWindowProcW forwarded | PE forwarder to user32.CallWindowProcW; same Win32 signature, windows are real PC user32 windows
 2539 ClipCursor implemented | console body: SetLastError(E_NOTIMPL 0x80004001), returns 0; reproduced exactly (not forwarded: PC user32 implements it)
-2540 CreateWindowExA forwarded | PE forwarder to user32.CreateWindowExA; same Win32 signature, windows are real PC user32 windows
-2541 CreateWindowExW forwarded | PE forwarder to user32.CreateWindowExW; same Win32 signature, windows are real PC user32 windows
+2540 CreateWindowExA implemented | class and window names are UTF-8 (the console has no ANSI code page) converted to UTF-16 and created with user32 CreateWindowExW, so the window is Unicode like every console window and DefWindowProcA/W (both DefWindowProcW) read its title correctly; test runs (TOMBOX_TEST_RUN=1) prefix the title and never take focus
+2541 CreateWindowExW implemented | user32 CreateWindowExW; test runs (TOMBOX_TEST_RUN=1) prefix the title with [TEST RUN - input disabled] and add WS_EX_NOACTIVATE so the window never takes focus
 2542 DefWindowProcA forwarded | PE forwarder to user32.DefWindowProcW; console DefWindowProcA is the same address as DefWindowProcW; forwarded for the same reason as DefWindowProcW
 2543 DefWindowProcW forwarded | PE forwarder to user32.DefWindowProcW; console body returns 1 for message 1 and 0 otherwise because its CoreWindow windows never need default processing; forwarded because CreateWindowEx forwards to user32 and real PC windows need PC default processing (WM_NCCREATE must return TRUE)
 2544 DestroyCursor forwarded | PE forwarder to user32.DestroyCursor; same Win32 signature, windows are real PC user32 windows
@@ -44,7 +44,7 @@
 2577 PostThreadMessageA implemented | console PostThreadMessageA is a jmp to PostThreadMessageW with no ANSI conversion; same code path as PostThreadMessageW
 2578 PostThreadMessageW implemented | console api.cpp PostThreadMessageW: enqueue into the target thread queue with hwnd NULL (same coalescing and overflow as PostMessageW; an unknown thread fails with the PC code 1444, not verified against the console thread table), BOOL from HRESULT, last error set from it
 2579 RegisterClassA forwarded | PE forwarder to user32.RegisterClassA; same Win32 signature, windows are real PC user32 windows
-2580 RegisterClassExA forwarded | PE forwarder to user32.RegisterClassExA; same Win32 signature, windows are real PC user32 windows
+2580 RegisterClassExA implemented | UTF-8 class and menu names converted to UTF-16 and registered with user32 RegisterClassExW, so windows of the class are Unicode as on the console
 2581 RegisterClassExW forwarded | PE forwarder to user32.RegisterClassExW; same Win32 signature, windows are real PC user32 windows
 2582 RegisterClassW forwarded | PE forwarder to user32.RegisterClassW; same Win32 signature, windows are real PC user32 windows
 2583 RegisterWindowMessageA implemented | console body: SetLastError(E_NOTIMPL 0x80004001), returns 0; reproduced exactly (not forwarded: PC user32 implements it)
@@ -67,7 +67,7 @@
 2600 SetWindowLongW forwarded | PE forwarder to user32.SetWindowLongW; same Win32 signature, windows are real PC user32 windows
 2601 SetWindowPos forwarded | PE forwarder to user32.SetWindowPos; same Win32 signature, windows are real PC user32 windows
 2602 ShowCursor forwarded | PE forwarder to user32.ShowCursor; console keeps one process-wide counter, PC keeps it per input thread (see os_host coverage.rs)
-2603 ShowWindow forwarded | PE forwarder to user32.ShowWindow; same Win32 signature, windows are real PC user32 windows
+2603 ShowWindow implemented | user32 ShowWindow; test runs (TOMBOX_TEST_RUN=1) show without activating (SW_SHOWNOACTIVATE / SW_SHOWNA) so a test window never steals focus
 2604 TranslateMessage forwarded | PE forwarder to user32.TranslateMessage; console body returns 0 (no WM_CHAR synthesis, text comes from CoreWindow); forwarded because keyboard input arrives as PC user32 messages
 2605 UnregisterClassA forwarded | PE forwarder to user32.UnregisterClassA; same Win32 signature, windows are real PC user32 windows
 2606 UnregisterClassW forwarded | PE forwarder to user32.UnregisterClassW; same Win32 signature, windows are real PC user32 windows

@@ -3,7 +3,7 @@ name = "xgs-kmd-emu"
 version = "0.1.0"
 edition = "2021"
 description = "In-process emulation of the console graphics kernel driver (xgskmd.sys / xgskmd10.sys) device handle and the IOCTLs the emulator models, shared by d3d12_x and d3d12_xs."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xgs_kmd_emu"

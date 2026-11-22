@@ -18,7 +18,7 @@ fn mubuf_op(op: u32, vaddr: u32, vdata: u32, srsrc: u32) -> [u32; 2] {
 }
 
 fn root(params: Vec<RootParam>) -> RootSig {
-    RootSig { version: 2, flags: 0, params, num_static_samplers: 0 }
+    RootSig { version: 2, flags: 0, params, num_static_samplers: 0, static_samplers: Vec::new() }
 }
 
 fn desc(kind: u32, register: u32) -> RootParam {

@@ -3,7 +3,7 @@ name = "xpal"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for Xbox xpal.dll: platform abstraction layer over an emulated console hypervisor, XConfig store and XVmCtrl host device."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xpal"

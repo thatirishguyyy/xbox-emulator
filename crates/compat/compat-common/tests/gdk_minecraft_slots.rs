@@ -51,9 +51,18 @@ fn minecraft_call_sites_are_served() {
 fn shared_vtable_iids_reuse_the_same_slot_functions() {
     env();
     unsafe {
-        for s in [17, 18, 19] {
-            assert_eq!(method(ui::CLSID, ui::IID_FC0B, s).1, method(ui::CLSID, ui::IID_V1, s).1);
+        for s in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 24, 25, 26, 27, 30, 31] {
+            assert_eq!(method(ui::CLSID, ui::IID_FC0B, s).1, method(ui::CLSID, ui::IID_V2, s).1, "fc0b9bd0 slot {s}");
         }
+        let have = gdk::implemented();
+        let slots_of = |iid: Guid| { let mut v = have.iter().find(|r| r.0 == ui::CLSID && r.1 == iid).unwrap().3.clone(); v.sort(); v };
+        assert_eq!(slots_of(ui::IID_FC0B), slots_of(ui::IID_V2));
+        let (uo, size_f) = method(ui::CLSID, ui::IID_FC0B, 18);
+        let size_f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut u32) -> i32 = core::mem::transmute(size_f);
+        let mut idle = Box::new(Block { queue: 0, context: 0, callback: 0, internal: [0; 32] });
+        let mut sz = 0x5a5a_5a5au32;
+        assert!(size_f(uo, &mut *idle as *mut Block as *mut c_void, &mut sz) < 0);
+        assert_eq!(sz, 0x5a5a_5a5a);
         assert_eq!(method(user::CLSID, user::IID_V1, 13).1, method(user::CLSID, user::IID_V2, 13).1);
         let (o, guest) = method(user::CLSID, user::IID_V1, 13);
         let guest: unsafe extern "system" fn(*mut c_void, usize, *mut bool) -> i32 = core::mem::transmute(guest);
@@ -77,17 +86,42 @@ fn shared_vtable_iids_reuse_the_same_slot_functions() {
 fn xsystem_6fd71f09_layout_matches_the_console_vtable() {
     env();
     unsafe {
-        let call = |slot: usize| {
+        let call = |slot: usize, n: usize| {
             let (o, f) = method(system::XSYSTEM, system::XSYSTEM_V3, slot);
             let f: unsafe extern "system" fn(*mut c_void, usize, *mut u8, *mut usize) -> i32 = core::mem::transmute(f);
-            let mut buf = [0u8; 128];
+            let mut buf = vec![0xccu8; n];
             let mut used = 0usize;
-            assert_eq!(f(o, buf.len(), buf.as_mut_ptr(), &mut used), 0);
-            String::from_utf8_lossy(&buf[..used.saturating_sub(1)]).into_owned()
+            assert_eq!(f(o, n, buf.as_mut_ptr(), &mut used), 0);
+            (String::from_utf8_lossy(&buf[..used.saturating_sub(1)]).into_owned(), used, buf)
         };
-        assert_eq!(call(3), system::console_id());
-        assert_eq!(call(4), system::sandbox_id());
-        assert_eq!(call(5), system::app_device_id());
+        let (cid, cu, cb) = call(3, 39);
+        assert_eq!(cid, system::console_id());
+        assert_eq!(cu, 39);
+        assert_eq!(cid.len(), 38);
+        assert_eq!(cb[38], 0);
+        let g: Vec<usize> = cid.split('.').map(|p| p.len()).collect();
+        assert_eq!(g, vec![8, 8, 8, 8, 2]);
+        assert!(cid.chars().all(|c| c == '.' || c.is_ascii_hexdigit()));
+        let (sid, su, sb) = call(4, 16);
+        assert_eq!(sid, system::sandbox_id());
+        assert_eq!(su, sid.len() + 1);
+        assert!(sb[su - 1..].iter().all(|&c| c == 0));
+        let (aid, au, ab) = call(5, 45);
+        assert_eq!(aid, system::app_device_id());
+        assert_eq!(aid.len(), 44);
+        assert_eq!(au, 45);
+        assert_eq!(ab[44], 0);
+        assert!(aid.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/' || c == b'='));
+        for (slot, n) in [(3usize, 39usize), (4, 16), (5, 45)] {
+            let (o, f) = method(system::XSYSTEM, system::XSYSTEM_V3, slot);
+            let f: unsafe extern "system" fn(*mut c_void, usize, *mut u8, *mut usize) -> i32 = core::mem::transmute(f);
+            let mut buf = vec![0xccu8; n];
+            let mut used = 0x1234usize;
+            assert_eq!(f(o, n - 1, buf.as_mut_ptr(), &mut used), 0x8007_007Au32 as i32);
+            assert_eq!(used, 0x1234);
+            assert!(buf.iter().all(|&c| c == 0xcc));
+            assert_eq!(f(o, n, buf.as_mut_ptr(), core::ptr::null_mut()), 0);
+        }
         assert_eq!(method(system::XSYSTEM, system::XSYSTEM_V3, 5).1, method(system::XSYSTEM, system::XSYSTEM_V2, 5).1);
     }
 }
@@ -108,6 +142,11 @@ fn pls_prompt_for_space_completes_from_free_space() {
     env();
     assert_eq!(system::pls_prompt_result(10, 10), 0);
     assert_eq!(system::pls_prompt_result(11, 10), 0x8000_4004u32 as i32);
+    assert_eq!(system::pls_prompt_needed(30, 10), 20);
+    assert_eq!(system::pls_prompt_needed(10, 10), 0xa0_0000);
+    assert_eq!(system::pls_prompt_needed(0, 10), 0xa0_0000);
+    assert_eq!(system::pls_prompt_check(11, 10), 0x8007_0057u32 as i32);
+    assert_eq!(system::pls_prompt_check(10, 10), 0);
     unsafe {
         let (o, prompt) = method(system::PLS, system::PLS_IID, 6);
         let prompt: unsafe extern "system" fn(*mut c_void, u64, *mut c_void) -> i32 = core::mem::transmute(prompt);
@@ -121,9 +160,16 @@ fn pls_prompt_for_space_completes_from_free_space() {
         assert_eq!(result(o, bp as *mut c_void), 0);
         let mut b2 = Box::new(Block { queue: 0, context: 0, callback: 0, internal: [0; 32] });
         let bp2 = &mut *b2 as *mut Block;
-        assert_eq!(prompt(o, u64::MAX, bp2 as *mut c_void), 0);
-        assert_eq!(wait_status(bp2), 0x8000_4004u32 as i32);
-        assert_eq!(result(o, bp2 as *mut c_void), 0x8000_4004u32 as i32);
+        assert_eq!(prompt(o, u64::MAX, bp2 as *mut c_void), 0x8007_0057u32 as i32);
+        let (_, info) = method(system::PLS, system::PLS_IID, 5);
+        let info: unsafe extern "system" fn(*mut c_void, *mut u64) -> i32 = core::mem::transmute(info);
+        let mut sp = [0u64; 4];
+        assert_eq!(info(o, sp.as_mut_ptr()), 0);
+        if sp[0] < sp[3] {
+            assert_eq!(prompt(o, sp[3], bp2 as *mut c_void), 0);
+            assert_eq!(wait_status(bp2), 0x8000_4004u32 as i32);
+            assert_eq!(result(o, bp2 as *mut c_void), 0x8000_4004u32 as i32);
+        }
     }
 }
 
@@ -149,6 +195,69 @@ unsafe extern "system" fn monitor(ctx: *mut c_void, q: usize, port: u32) {
         let f: unsafe extern "system" fn(*mut c_void, usize, u32, u32) -> bool = core::mem::transmute(d);
         let (o, _) = method(xasync::XASYNC, xasync::XASYNC, 16);
         f(o, q, port, 0);
+    }
+}
+
+unsafe extern "system" fn quiet_task(_c: *mut c_void, _canceled: bool) {}
+
+static SEEN_COMPOSITE: Mutex<Vec<(usize, usize, u32)>> = Mutex::new(Vec::new());
+
+unsafe extern "system" fn monitor_composite(ctx: *mut c_void, q: usize, port: u32) {
+    SEEN_COMPOSITE.lock().unwrap().push((ctx as usize, q, port));
+}
+
+#[test]
+fn task_queue_monitors_belong_to_the_queue_not_the_shared_port() {
+    env();
+    unsafe {
+        let x = xasync::XASYNC;
+        let (o, create) = method(x, x, 12);
+        let create: unsafe extern "system" fn(*mut c_void, u32, u32, *mut usize) -> i32 = core::mem::transmute(create);
+        let composite: unsafe extern "system" fn(*mut c_void, usize, usize, *mut usize) -> i32 = core::mem::transmute(method(x, x, 13).1);
+        let get_port: unsafe extern "system" fn(*mut c_void, usize, u32, *mut usize) -> i32 = core::mem::transmute(method(x, x, 14).1);
+        let dispatch: unsafe extern "system" fn(*mut c_void, usize, u32, u32) -> bool = core::mem::transmute(method(x, x, 16).1);
+        let close: unsafe extern "system" fn(*mut c_void, usize) = core::mem::transmute(method(x, x, 17).1);
+        let submit: unsafe extern "system" fn(*mut c_void, usize, u32, *mut c_void, Cb) -> i32 = core::mem::transmute(method(x, x, 18).1);
+        let register: unsafe extern "system" fn(*mut c_void, usize, *mut c_void, Option<MonCb>, *mut u64) -> i32 = core::mem::transmute(method(x, x, 23).1);
+        let unregister: unsafe extern "system" fn(*mut c_void, usize, u64) = core::mem::transmute(method(x, x, 24).1);
+
+        let mut a = 0usize;
+        assert_eq!(create(o, 0, 0, &mut a), 0);
+        let (mut wp, mut cp) = (0usize, 0usize);
+        assert_eq!(get_port(o, a, 0, &mut wp), 0);
+        assert_eq!(get_port(o, a, 1, &mut cp), 0);
+        let mut c = 0usize;
+        assert_eq!(composite(o, cp, wp, &mut c), 0);
+        assert_ne!(c, a);
+
+        let mut ta = 0u64;
+        assert_eq!(register(o, a, 21 as *mut c_void, Some(monitor_composite), &mut ta), 0);
+        assert_eq!(submit(o, c, 0, core::ptr::null_mut(), quiet_task), 0);
+        assert!(SEEN_COMPOSITE.lock().unwrap().is_empty());
+        assert!(dispatch(o, a, 1, 0));
+
+        let mut tc = 0u64;
+        assert_eq!(register(o, c, 22 as *mut c_void, Some(monitor_composite), &mut tc), 0);
+        assert_eq!(submit(o, c, 0, core::ptr::null_mut(), quiet_task), 0);
+        assert_eq!(submit(o, c, 1, core::ptr::null_mut(), quiet_task), 0);
+        assert_eq!(*SEEN_COMPOSITE.lock().unwrap(), vec![(22, c, 0), (22, c, 1)]);
+        assert_eq!(submit(o, a, 0, core::ptr::null_mut(), quiet_task), 0);
+        assert_eq!(SEEN_COMPOSITE.lock().unwrap()[2], (21, a, 0));
+        assert_eq!(SEEN_COMPOSITE.lock().unwrap().len(), 3);
+        assert!(dispatch(o, a, 1, 0));
+        assert!(dispatch(o, a, 0, 0));
+        assert!(dispatch(o, a, 0, 0));
+
+        unregister(o, a, tc);
+        assert_eq!(submit(o, c, 0, core::ptr::null_mut(), quiet_task), 0);
+        assert_eq!(SEEN_COMPOSITE.lock().unwrap().len(), 4);
+        unregister(o, c, tc);
+        unregister(o, a, ta);
+        assert_eq!(submit(o, c, 0, core::ptr::null_mut(), quiet_task), 0);
+        assert_eq!(submit(o, a, 0, core::ptr::null_mut(), quiet_task), 0);
+        assert_eq!(SEEN_COMPOSITE.lock().unwrap().len(), 4);
+        close(o, c);
+        close(o, a);
     }
 }
 

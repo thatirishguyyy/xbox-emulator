@@ -3,7 +3,7 @@ name = "pixrt10"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox console pixrt10.dll (the runtime pixevt picks when the XgsKmd10 GPU tools driver is present): PixDllInitializeToolMemory with its unguarded tooling-memory allocator table; the GPU capture runtime behind PixDllInitialize and PixDllInitializeFromTitle is not reproduced."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "../pixrt/build.rs"
 
 [lib]

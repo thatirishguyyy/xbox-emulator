@@ -121,18 +121,21 @@ unsafe extern "system" fn dc_register_extension(this: *mut DispatcherCom, id: *c
     XbtpExtensionRegistry_RegisterExtension(d.registry.ptr, id, path)
 }
 
-unsafe extern "system" fn dc_register_redirect(_this: *mut DispatcherCom, _port: u32, _address: *const u16, _redirect_port: u32) -> HRESULT {
-    E_NOTIMPL
+unsafe extern "system" fn dc_register_redirect(this: *mut DispatcherCom, port: u32, address: *const u16, redirect_port: u32) -> HRESULT {
+    let d = match dispatcher_impl((*this).dispatcher.ptr) {
+        Some(d) => d,
+        None => return E_INVALIDARG,
+    };
+    crate::dispatcher::add_redirect(&d, port, address, redirect_port)
 }
 
 unsafe extern "system" fn dc_set_session_key(this: *mut DispatcherCom, key: *const u16) -> HRESULT {
     let _g = (*this).lock.lock().unwrap_or_else(|e| e.into_inner());
     if !key.is_null() && wcslen(key) > MAX_SESSION_KEY {
-        return E_INVALIDARG;
+        return S_OK;
     }
-    let d = match dispatcher_impl((*this).dispatcher.ptr) {
-        Some(d) => d,
-        None => return E_INVALIDARG,
-    };
-    set_session_key(&d, key)
+    if let Some(d) = dispatcher_impl((*this).dispatcher.ptr) {
+        set_session_key(&d, key);
+    }
+    S_OK
 }

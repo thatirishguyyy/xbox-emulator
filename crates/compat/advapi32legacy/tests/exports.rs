@@ -85,6 +85,17 @@ fn lsa_password_less_exports_write_the_emulated_device_value() {
         assert_eq!(std::fs::read_to_string(&value).unwrap().trim(), "2");
         assert_eq!(disable(), 0);
         assert_eq!(std::fs::read_to_string(&value).unwrap().trim(), "0");
+        let ic = root.join("hklm").join(r"SYSTEM\CurrentControlSet\Control\Cryptography\PwdlessPlat\ImageCustomization");
+        std::fs::create_dir_all(&ic).unwrap();
+        std::fs::write(ic.join("ForceDisablePasswordlessNewDevices.dword"), "1\n").unwrap();
+        let me = advapi32legacy::passwordless::TitleToken::caller().user;
+        assert!(me.starts_with("S-1-"));
+        let uc = root.join("hklm").join(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\UserConfig").join(&me).join("PasswordLess.dword");
+        assert_eq!(enable(), 0);
+        assert_eq!(std::fs::read_to_string(&uc).unwrap().trim(), "1");
+        assert_eq!(disable(), 0);
+        assert_eq!(std::fs::read_to_string(&uc).unwrap().trim(), "2");
+        assert_eq!(std::fs::read_to_string(&value).unwrap().trim(), "0");
     }
     let _ = std::fs::remove_dir_all(&root);
 }

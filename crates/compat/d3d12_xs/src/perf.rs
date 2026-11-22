@@ -8,8 +8,11 @@ pub const RTCAP: usize = 1;
 pub const COPY: usize = 2;
 pub const SHADER: usize = 3;
 pub const PSO: usize = 4;
-const SLOTS: usize = 5;
-const NAMES: [&str; SLOTS] = ["upload", "rtcap", "present_copy", "shader_xlat", "pso_create"];
+pub const PWAIT: usize = 5;
+pub const PFLIP: usize = 6;
+pub const OVERLAY: usize = 7;
+const SLOTS: usize = 8;
+const NAMES: [&str; SLOTS] = ["upload", "rtcap", "present_copy", "shader_xlat", "pso_create", "present_wait", "present_flip", "overlay"];
 const RING: usize = 1024;
 const WINDOW_SECONDS: i64 = 5;
 
@@ -151,6 +154,7 @@ pub fn on_present() {
             layers.push_str(&format!(" {}={:.2}ms/f(max {:.1})", NAMES[s], ms(t) / frames as f64, ms(mx)));
         }
     }
+    layers.push_str(&crate::qwait::report(frames));
     record("d3d12_xs", "[perf]", &format!(
         "fps={fps:.1} ft_p50={fl50:.2}ms ft_p99={fl99:.2}ms present_int={mean_pi:.2}ms (p50 {p50:.2} p99 {p99:.2} max {maxpi:.1}) origin_wait={wait_ms:.2}ms/f origin_ticks={origin_ticks} clock_late_max={late_us:.0}us interval={}us host={}.{:03}Hz{layers}",
         crate::frame::interval_us(), crate::frame::host_refresh_mhz() / 1000, crate::frame::host_refresh_mhz() % 1000));

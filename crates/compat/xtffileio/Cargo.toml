@@ -3,7 +3,7 @@ name = "xtffileio"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console xtffileio.dll (Xbox Tools Framework file I/O server extension: XbtpServerEntryPoint and the file-operation handlers over the console sandbox filesystem)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

@@ -68,11 +68,6 @@ type CanUnloadFn = unsafe extern "system" fn() -> i32;
 
 #[no_mangle]
 pub unsafe extern "system" fn DllGetClassObject(clsid: *const Guid, iid: *const Guid, ppv: *mut *mut c_void) -> i32 {
-    if !ppv.is_null() && !clsid.is_null() && *clsid == CLSID_LOGAN_BOUND {
-        *ppv = core::ptr::null_mut();
-        compat_common::record_raw("XVMAudioService.dll", "DllGetClassObject", "class e782ced1 opens the acpi_hal Logan device (lower ACPI IOCTLs e00b/e00f/e013/e017/e01f, not in any dump) and its constructor throws a C++ exception out of CreateInstance without it; CLASS_E_CLASSNOTAVAILABLE");
-        return CLASS_E_CLASSNOTAVAILABLE;
-    }
     match console_image::symbol(console_module(), "DllGetClassObject") {
         Some(p) => {
             let f: ClassObjectFn = core::mem::transmute(p);

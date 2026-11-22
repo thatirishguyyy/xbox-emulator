@@ -3,7 +3,7 @@ name = "console-image"
 version = "0.1.0"
 edition = "2021"
 description = "Locates and loads a console DLL from a title EmbeddedXvd dump (read-only) for forwarding compat DLLs."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "console_image"

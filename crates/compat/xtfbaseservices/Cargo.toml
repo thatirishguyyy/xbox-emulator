@@ -3,7 +3,7 @@ name = "xtfbaseservices"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console xtfbaseservices.dll (Xbox Tools Framework logging manager, logging targets and assert/error system)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

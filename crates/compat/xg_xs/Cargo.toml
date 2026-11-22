@@ -3,7 +3,7 @@ name = "xg_xs"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for Xbox xg_xs.dll — XG texture/resource layout helper (logging stub)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "xg_xs"

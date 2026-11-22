@@ -3,7 +3,7 @@ name = "remotewinrt"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console RemoteWinRT.dll (GameCore cross-VM WinRT helpers): ERA/SRA VM alias and SEVPipe endpoint names, suspend exemptions, WaitRemotePipe."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

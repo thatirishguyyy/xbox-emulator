@@ -3,7 +3,7 @@ name = "netprofmsvc_c"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console netprofmsvc_c.dll (Network Profile service): the svchost globals push and the console DllMain (TraceLogging provider, aggregate state, wil failure callback); the service body is not ported."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

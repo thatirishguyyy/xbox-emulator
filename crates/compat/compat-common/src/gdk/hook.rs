@@ -22,13 +22,19 @@ pub const OEM_KEY: &str = "Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM"
 const HKLM: usize = 0xffff_ffff_8000_0002;
 const SENTINEL: usize = 0x5842_4F58_4F45_4D11;
 pub const PASSWORDLESS_DEVICE_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\PasswordLess\\Device";
-const SENTINEL_PASSWORDLESS: usize = 0x5842_4F58_5057_4C11;
+const EMULATED_TAG: usize = 0x5842_4F58_5200_0000;
+const EMULATED_MASK: usize = 0xffff_ffff_ff00_0000;
+
+use super::emureg::{self, Hive};
+
+static EMULATED_KEYS: std::sync::Mutex<Vec<(usize, Hive, String)>> = std::sync::Mutex::new(Vec::new());
+static NEXT_KEY: AtomicUsize = AtomicUsize::new(1);
 
 pub fn emulated_hklm_key(root: &std::path::Path, sub: &str) -> Option<std::path::PathBuf> {
-    if !sub.eq_ignore_ascii_case(PASSWORDLESS_DEVICE_KEY) {
+    if !emureg::is_emulated(Hive::Hklm, sub) {
         return None;
     }
-    Some(sub.split('\\').filter(|c| !c.is_empty()).fold(root.join("hklm"), |a, c| a.join(c)))
+    emureg::key_dir(root, Hive::Hklm, sub)
 }
 
 pub fn emulated_hklm_open(root: &std::path::Path, sub: &str) -> Option<i32> {
@@ -37,41 +43,82 @@ pub fn emulated_hklm_open(root: &std::path::Path, sub: &str) -> Option<i32> {
 }
 
 pub fn emulated_hklm_dword(root: &std::path::Path, value: &str) -> Option<u32> {
-    let dir = emulated_hklm_key(root, PASSWORDLESS_DEVICE_KEY)?;
-    std::fs::read_to_string(dir.join(format!("{value}.dword"))).ok()?.trim().parse().ok()
+    match emureg::get_value(root, Hive::Hklm, PASSWORDLESS_DEVICE_KEY, value).ok()? {
+        (emureg::REG_DWORD, b) => Some(u32::from_le_bytes(b.try_into().ok()?)),
+        _ => None,
+    }
+}
+
+fn predefined(hkey: usize) -> Option<u32> {
+    let hi = hkey >> 32;
+    (hi == 0 || hi == 0xffff_ffff).then_some(hkey as u32)
+}
+
+fn is_emulated_handle(hkey: usize) -> bool {
+    hkey & EMULATED_MASK == EMULATED_TAG
+}
+
+fn emulated_key(hkey: usize) -> Option<(Hive, String)> {
+    EMULATED_KEYS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(h, _, _)| *h == hkey).map(|(_, hv, p)| (*hv, p.clone()))
+}
+
+pub fn emulated_target(hkey: usize, sub: &str, current_user: Option<&str>) -> Option<(Hive, String)> {
+    let (hive, base) = if is_emulated_handle(hkey) {
+        emulated_key(hkey)?
+    } else {
+        match predefined(hkey)? {
+            0x8000_0002 => (Hive::Hklm, String::new()),
+            0x8000_0003 => (Hive::Hku, String::new()),
+            0x8000_0001 => (Hive::Hku, current_user?.to_string()),
+            _ => return None,
+        }
+    };
+    let path = if base.is_empty() { sub.to_string() } else if sub.is_empty() { base } else { format!("{base}\\{sub}") };
+    emureg::is_emulated(hive, &path).then_some((hive, path))
+}
+
+pub fn emulated_open_at(root: &std::path::Path, hkey: usize, sub: &str, current_user: Option<&str>) -> Option<Result<usize, i32>> {
+    let (hive, path) = emulated_target(hkey, sub, current_user)?;
+    if !emureg::key_exists(root, hive, &path) {
+        return Some(Err(2));
+    }
+    let h = EMULATED_TAG | (NEXT_KEY.fetch_add(1, Ordering::Relaxed) & !EMULATED_MASK);
+    EMULATED_KEYS.lock().unwrap_or_else(|e| e.into_inner()).push((h, hive, path));
+    Some(Ok(h))
+}
+
+pub unsafe fn emulated_query_at(root: &std::path::Path, hkey: usize, name: *const u16, kind: *mut u32, data: *mut u8, cb: *mut u32) -> Option<i32> {
+    if !is_emulated_handle(hkey) {
+        return None;
+    }
+    let Some((hive, path)) = emulated_key(hkey) else { return Some(6) };
+    let n = super::wstr(name).unwrap_or_default();
+    Some(emureg::query_into(emureg::get_value(root, hive, &path, &n), kind, data, cb))
+}
+
+pub fn emulated_close(hkey: usize) -> Option<i32> {
+    if !is_emulated_handle(hkey) {
+        return None;
+    }
+    let mut keys = EMULATED_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let before = keys.len();
+    keys.retain(|(h, _, _)| *h != hkey);
+    Some(if keys.len() < before { 0 } else { 6 })
 }
 
 unsafe fn emulated_open(hkey: usize, sub: *const u16, out: *mut usize) -> Option<i32> {
-    if hkey != HKLM || CONSOLE_MODE.load(Ordering::Relaxed) == 0 || out.is_null() {
+    if CONSOLE_MODE.load(Ordering::Relaxed) == 0 || out.is_null() {
         return None;
     }
-    let r = emulated_hklm_open(&super::data_root(), &super::wstr(sub)?)?;
-    if r == 0 {
-        *out = SENTINEL_PASSWORDLESS;
-    }
-    Some(r)
-}
-
-unsafe fn query_emulated_dword(name: *const u16, kind: *mut u32, data: *mut u8, cb: *mut u32) -> i32 {
-    let Some(v) = super::wstr(name).and_then(|n| emulated_hklm_dword(&super::data_root(), &n)) else {
-        return 2;
-    };
-    if !kind.is_null() {
-        *kind = 4;
-    }
-    if !data.is_null() {
-        if cb.is_null() || *cb < 4 {
-            if !cb.is_null() {
-                *cb = 4;
-            }
-            return 234;
+    let s = if sub.is_null() { String::new() } else { super::wstr(sub)? };
+    let me = if predefined(hkey) == Some(0x8000_0001) { emureg::effective_user() } else { None };
+    match emulated_open_at(&super::data_root(), hkey, &s, me.as_deref())? {
+        Ok(h) => {
+            *out = h;
+            Some(0)
         }
-        core::ptr::write_unaligned(data as *mut u32, v);
+        Err(e) => Some(e),
     }
-    if !cb.is_null() {
-        *cb = 4;
-    }
-    0
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -179,16 +226,19 @@ unsafe extern "system" fn reg_query_hook(hkey: usize, name: *const u16, reserved
     if hkey == SENTINEL {
         return query_console_mode(name, kind, data, cb);
     }
-    if hkey == SENTINEL_PASSWORDLESS {
-        return query_emulated_dword(name, kind, data, cb);
+    if let Some(r) = emulated_query_at(&super::data_root(), hkey, name, kind, data, cb) {
+        return r;
     }
     let f: unsafe extern "system" fn(usize, *const u16, *mut u32, *mut u32, *mut u8, *mut u32) -> i32 = core::mem::transmute(ORIG_REG_QUERY.load(Ordering::Acquire));
     f(hkey, name, reserved, kind, data, cb)
 }
 
 unsafe extern "system" fn reg_close_hook(hkey: usize) -> i32 {
-    if hkey == SENTINEL || hkey == SENTINEL_PASSWORDLESS {
+    if hkey == SENTINEL {
         return 0;
+    }
+    if let Some(r) = emulated_close(hkey) {
+        return r;
     }
     let f: unsafe extern "system" fn(usize) -> i32 = core::mem::transmute(ORIG_REG_CLOSE.load(Ordering::Acquire));
     f(hkey)
@@ -411,6 +461,88 @@ mod emulated_hklm_tests {
         std::fs::write(dir.join("DevicePasswordLessBuildVersion.dword"), "2\n").unwrap();
         assert_eq!(emulated_hklm_dword(&root, "DevicePasswordLessBuildVersion"), Some(2));
         assert_eq!(emulated_hklm_dword(&root, "Other"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn w(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    #[test]
+    fn hku_families_and_user_config_keys_are_served_through_emulated_handles() {
+        let root = std::env::temp_dir().join(format!("tombox_cc_hku_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sid = "S-1-5-21-11-22-33-1001";
+        let pkg = format!("{sid}\\{}\\Fam_8wekyb3d8bbwe\\Fam_1.0.0.0_x64__8wekyb3d8bbwe", emureg::FAMILIES);
+        assert_eq!(emulated_open_at(&root, 0x8000_0003, &pkg, None), Some(Err(2)));
+        assert_eq!(emulated_open_at(&root, 0x8000_0003, &format!("{sid}\\Software\\Microsoft"), None), None);
+        emureg::create_key(&root, Hive::Hku, &pkg).unwrap();
+        emureg::set_value(&root, Hive::Hku, &pkg, "InstallTime", emureg::REG_QWORD, &0x0102_0304_0506_0708u64.to_le_bytes()).unwrap();
+        emureg::set_value(&root, Hive::Hku, &pkg, "Flags", emureg::REG_DWORD, &3u32.to_le_bytes()).unwrap();
+        let rel = format!("{}\\Fam_8wekyb3d8bbwe\\Fam_1.0.0.0_x64__8wekyb3d8bbwe", emureg::FAMILIES);
+        let h = emulated_open_at(&root, 0xffff_ffff_8000_0001, &rel, Some(sid)).unwrap().unwrap();
+        unsafe {
+            let (mut kind, mut cb) = (0u32, 0u32);
+            assert_eq!(emulated_query_at(&root, h, w("InstallTime").as_ptr(), &mut kind, core::ptr::null_mut(), &mut cb), Some(0));
+            assert_eq!((kind, cb), (emureg::REG_QWORD, 8));
+            let mut v = 0u64;
+            assert_eq!(emulated_query_at(&root, h, w("InstallTime").as_ptr(), &mut kind, &mut v as *mut u64 as *mut u8, &mut cb), Some(0));
+            assert_eq!(v, 0x0102_0304_0506_0708);
+            let mut d = 0u32;
+            cb = 4;
+            assert_eq!(emulated_query_at(&root, h, w("Flags").as_ptr(), &mut kind, &mut d as *mut u32 as *mut u8, &mut cb), Some(0));
+            assert_eq!((kind, cb, d), (emureg::REG_DWORD, 4, 3));
+            assert_eq!(emulated_query_at(&root, h, w("Gone").as_ptr(), &mut kind, core::ptr::null_mut(), &mut cb), Some(2));
+        }
+        assert_eq!(emulated_close(h), Some(0));
+        assert_eq!(emulated_close(h), Some(6));
+        let uc = format!("{}\\UserConfig\\{sid}", emureg::PASSWORDLESS_ROOT);
+        emureg::create_key(&root, Hive::Hklm, &uc).unwrap();
+        emureg::set_value(&root, Hive::Hklm, &uc, "PasswordLess", emureg::REG_DWORD, &1u32.to_le_bytes()).unwrap();
+        let h = emulated_open_at(&root, 0xffff_ffff_8000_0002, &uc, None).unwrap().unwrap();
+        unsafe {
+            let (mut kind, mut cb, mut d) = (0u32, 2u32, 0u32);
+            assert_eq!(emulated_query_at(&root, h, w("PasswordLess").as_ptr(), &mut kind, &mut d as *mut u32 as *mut u8, &mut cb), Some(234));
+            assert_eq!(cb, 4);
+            assert_eq!(emulated_query_at(&root, h, w("PasswordLess").as_ptr(), &mut kind, &mut d as *mut u32 as *mut u8, &mut cb), Some(0));
+            assert_eq!(d, 1);
+        }
+        assert_eq!(emulated_close(h), Some(0));
+        assert!(emulated_open_at(&root, 0xffff_ffff_8000_0002, emureg::IMAGE_CUSTOMIZATION_KEY, None).is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reg_hooks_serve_hkcu_families_in_console_mode() {
+        let root = std::env::temp_dir().join(format!("tombox_cc_hookroot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("TOMBOX_GDK_ROOT", &root);
+        let me = emureg::effective_user().unwrap();
+        let rel = format!("{}\\Hook_8wekyb3d8bbwe\\Hook_1.0.0.0_x64__8wekyb3d8bbwe", emureg::FAMILIES);
+        let pkg = format!("{me}\\{rel}");
+        emureg::create_key(&root, Hive::Hku, &pkg).unwrap();
+        emureg::set_value(&root, Hive::Hku, &pkg, "InstallTime", emureg::REG_QWORD, &0x1122_3344_5566_7788u64.to_le_bytes()).unwrap();
+        let prev = CONSOLE_MODE.swap(0x64, Ordering::Relaxed);
+        unsafe {
+            let mut h = 0usize;
+            assert_eq!(reg_open_ex_hook(0xffff_ffff_8000_0001, w(&rel).as_ptr(), 0, 0x20019, &mut h), 0);
+            assert!(is_emulated_handle(h));
+            let (mut kind, mut cb, mut v) = (0u32, 8u32, 0u64);
+            assert_eq!(reg_query_hook(h, w("InstallTime").as_ptr(), core::ptr::null_mut(), &mut kind, &mut v as *mut u64 as *mut u8, &mut cb), 0);
+            assert_eq!((kind, cb, v), (emureg::REG_QWORD, 8, 0x1122_3344_5566_7788));
+            assert_eq!(reg_close_hook(h), 0);
+            let mut h2 = 0usize;
+            assert_eq!(reg_open_hook(0xffff_ffff_8000_0003, w(&format!("{me}\\{}\\Missing_8wekyb3d8bbwe", emureg::FAMILIES)).as_ptr(), &mut h2), 2);
+            let mut fam = 0usize;
+            assert_eq!(reg_open_ex_hook(0xffff_ffff_8000_0003, w(&format!("{me}\\{}", emureg::FAMILIES)).as_ptr(), 0, 0x20019, &mut fam), 0);
+            let mut child = 0usize;
+            assert_eq!(reg_open_ex_hook(fam, w("Hook_8wekyb3d8bbwe\\Hook_1.0.0.0_x64__8wekyb3d8bbwe").as_ptr(), 0, 0x20019, &mut child), 0);
+            assert_eq!(reg_query_hook(child, w("InstallTime").as_ptr(), core::ptr::null_mut(), &mut kind, core::ptr::null_mut(), &mut cb), 0);
+            assert_eq!(cb, 8);
+            assert_eq!(reg_close_hook(child), 0);
+            assert_eq!(reg_close_hook(fam), 0);
+        }
+        CONSOLE_MODE.store(prev, Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

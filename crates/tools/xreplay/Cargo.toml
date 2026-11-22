@@ -3,7 +3,7 @@ name = "xreplay"
 version = "0.1.0"
 edition = "2021"
 description = "Replays a frame recorded by d3d12_xs (TOMBOX_RECORD) on the real GPU: isolate single draws/dispatches from draw-time snapshots, query/pipeline stats, inf/NaN per target, BMP dumps, re-translation with the current tombox-xshader."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "xreplay"

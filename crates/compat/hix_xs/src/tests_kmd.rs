@@ -65,9 +65,7 @@ fn kmd_maps_regions_and_acks_doorbell_requests_synchronously() {
 fn initialize_and_terminate_run_the_console_code_against_the_emulated_kmd() {
     scratch();
     let _g = crate::tests::LOCK.lock().unwrap();
-    if console::module() == 0 {
-        return;
-    }
+    assert_ne!(console::module(), 0, "console hix_xs.dll not found (TOMBOX_HIX_XS_CONSOLE, hix_xs_console.dll beside the DLL, or a title EmbeddedXvd dump); this test needs it");
     unsafe {
         let mb = kmd::region1() as *mut u8;
         (mb.add(BLOB_COUNT) as *mut u32).write_unaligned(7);
@@ -83,6 +81,7 @@ fn initialize_and_terminate_run_the_console_code_against_the_emulated_kmd() {
         assert_eq!(TerminateHix(), 0);
         assert_eq!(kmd::requests(), before + 2);
         assert_eq!(kmd::last_command(), Some(0x17));
+        assert_eq!(kmd::armed(), None, "DISARM clears the arm state set by IOCTL_ARM");
         let mb_seq = (mb.add(kmd::MAILBOX_SEQ) as *const u32).read_unaligned();
         assert_eq!(((kmd::region0() + kmd::DATA_ACK) as *const u32).read_volatile(), mb_seq);
     }

@@ -144,3 +144,50 @@ fn hw_slot44_sub_page_placements_at_title_vas_share_bytes_on_the_gpu() {
         }
     }
 }
+
+const IID_DESC_HEAP: Guid = Guid { d1: 0x8efb_471d, d2: 0x616c, d3: 0x4f49, d4: [0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51] };
+
+unsafe fn uav_table(dev: usize) -> (usize, usize) {
+    let d: [u32; 4] = [0, 4, 0, 0];
+    let mut h: *mut c_void = core::ptr::null_mut();
+    assert!(call!(dev, 14, (*const u32, *const Guid, *mut *mut c_void) -> i32, d.as_ptr(), &IID_DESC_HEAP, &mut h) >= 0 && !h.is_null());
+    let mut cpu = 0usize;
+    call!(h, 9, (*mut usize) -> *mut usize, &mut cpu);
+    (h as usize, cpu)
+}
+
+#[test]
+#[ignore = "needs a D3D12 device; run: cargo test -p d3d12_xs --lib hw_ -- --ignored --test-threads=1 (TOMBOX_HW_ADAPTER=warp for WARP)"]
+fn hw_structured_uav_on_a_sub_page_uav_buffer_keeps_the_device() {
+    let g = gpu();
+    let w = wrapped();
+    unsafe {
+        let va = 0x7340_0000_3a00u64;
+        let mut d = bdesc(8);
+        d[0x30..0x34].copy_from_slice(&FLAG_UAV.to_le_bytes());
+        let mut r: *mut c_void = core::ptr::null_mut();
+        let hr = call!(w, D_PLACED_X, (u64, *const u8, u32, *const c_void, *const Guid, *mut *mut c_void) -> i32, va, d.as_ptr(), ST_COMMON, core::ptr::null(), &IID_RESOURCE, &mut r);
+        assert!(hr >= 0 && !r.is_null(), "8-byte UAV buffer at a VA 0x3a00 into its page hr={hr:#010x}");
+        let mut gd = [0u8; 56];
+        call!(r, 10, (*mut u8) -> *mut u8, gd.as_mut_ptr());
+        assert_eq!(u64::from_le_bytes(gd[0x10..0x18].try_into().unwrap()), 8, "the title still reads its own width");
+        assert_eq!(crate::placed_offset::unpatched_width(r), Some(0x3a08), "the PC buffer starts at the 64 KB base");
+        let (_heap, cpu) = uav_table(g.dev);
+        let mut v = [0u8; 0x28];
+        v[4..8].copy_from_slice(&1u32.to_le_bytes());
+        v[0x10..0x14].copy_from_slice(&2u32.to_le_bytes());
+        v[0x14..0x18].copy_from_slice(&4u32.to_le_bytes());
+        call!(w, 19, (*mut c_void, *mut c_void, *const u8, usize) -> (), r, core::ptr::null_mut(), v.as_ptr(), cpu);
+        let reason = call!(g.dev, 37, () -> i32);
+        assert_eq!(reason, 0, "XDefiant's structured UAV (first 0, num 2, stride 4) on its 8-byte buffer at VA offset 0x3a00 removed the device: {reason:#010x}");
+        let mut raw = [0u8; 0x28];
+        raw[4..8].copy_from_slice(&1u32.to_le_bytes());
+        raw[0x10..0x14].copy_from_slice(&2u32.to_le_bytes());
+        raw[0x14..0x18].copy_from_slice(&4u32.to_le_bytes());
+        let (_h2, cpu2) = uav_table(g.dev);
+        call!(w, 19, (*mut c_void, *mut c_void, *const u8, usize) -> (), r, core::ptr::null_mut(), raw.as_ptr(), cpu2 + 64);
+        assert_eq!(call!(g.dev, 37, () -> i32), 0);
+        call!(r, 2, () -> u32);
+    }
+}
+

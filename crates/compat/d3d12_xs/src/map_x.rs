@@ -335,6 +335,57 @@ unsafe fn console_unmap(res: *mut c_void, written: Option<(u64, u64)>) -> bool {
     true
 }
 
+static TEX_MAPPED: Mutex<Option<HashMap<usize, u32>>> = Mutex::new(None);
+static TEX_BACK_LOCK: Mutex<()> = Mutex::new(());
+
+unsafe fn heap_type(res: *mut c_void) -> Option<u32> {
+    let mut hp = [0u32; 5];
+    let mut hf = 0u32;
+    let hr = unsafe { vcall!(res, 14, fn(*mut u32, *mut u32) -> i32, hp.as_mut_ptr(), &mut hf) };
+    if hr >= 0 { Some(hp[0]) } else { None }
+}
+
+unsafe fn texture_map(res: *mut c_void) -> Option<u64> {
+    let mut d = [0u8; 0x38];
+    unsafe { vcall!(res, 10, fn(*mut u8) -> *mut u8, d.as_mut_ptr()) };
+    if !crate::gpu_va::is_texture_desc(&d) {
+        return None;
+    }
+    let va = {
+        let _g = TEX_BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match crate::placed::lookup(res) {
+            Some(p) if p.dim() >= 2 && p.va != 0 && writable(p.va as usize, 1) => p.va,
+            Some(_) => return None,
+            None => {
+                if unsafe { heap_type(res) } != Some(1) {
+                    return None;
+                }
+                let x = crate::gpu_va::committed_texture_desc(res).filter(|x| crate::gpu_va::same_texture(x, &d))?;
+                let va = unsafe { crate::gpu_va::alloc_texture_backing(&x) }?;
+                unsafe { crate::gpu_va::adopt_backing(res, va, x, crate::gpu_va::state(res as usize)) };
+                static N: AtomicUsize = AtomicUsize::new(0);
+                if N.fetch_add(1, Ordering::Relaxed) < 16 {
+                    record("d3d12_xs", "map_x", &format!("Map res={res:p}: committed default-heap texture given console CPU memory {va:#x}+{:#x} (GetResourceAllocationInfo size); title writes reach the GPU through the placed-texture uploader | {}", crate::gpu_va::console_texture_size(&x), unsafe { describe(res) }));
+                }
+                va
+            }
+        }
+    };
+    *TEX_MAPPED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(res as usize).or_insert(0) += 1;
+    Some(va)
+}
+
+fn texture_unmap(res: *mut c_void) -> bool {
+    let mut g = TEX_MAPPED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(m) = g.as_mut() else { return false };
+    let Some(c) = m.get_mut(&(res as usize)) else { return false };
+    *c -= 1;
+    if *c == 0 {
+        m.remove(&(res as usize));
+    }
+    true
+}
+
 unsafe fn opt_range(r: *const (u64, u64)) -> Option<(u64, u64)> {
     if r.is_null() { None } else { Some(unsafe { *r }) }
 }
@@ -394,6 +445,12 @@ unsafe extern "system" fn map_hook(res: *mut c_void, sub: u32, range: *const (u6
             }
             return 0;
         }
+        if let Some(va) = unsafe { texture_map(res) } {
+            if !out.is_null() {
+                unsafe { *out = va as *mut c_void };
+            }
+            return 0;
+        }
     }
     if n < 32 {
         record("d3d12_xs", "map_x", &format!("Map FAILED res={res:p} sub={sub} range={rr:x?} out={out:p} hr={hr:#010x} | {}", unsafe { describe(res) }));
@@ -403,6 +460,9 @@ unsafe extern "system" fn map_hook(res: *mut c_void, sub: u32, range: *const (u6
 
 unsafe extern "system" fn unmap_hook(res: *mut c_void, sub: u32, written: *const (u64, u64)) {
     if crate::title_shadow::map_va(res).is_some() {
+        return;
+    }
+    if sub == 0 && texture_unmap(res) {
         return;
     }
     if sub == 0 && unsafe { console_unmap(res, opt_range(written)) } {

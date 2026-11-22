@@ -112,6 +112,12 @@ console_notimpl!(
 
 #[link(name = "user32")]
 extern "system" {
+    fn CreateWindowExW(ex: u32, cls: *const u16, name: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32, parent: *mut c_void, menu: *mut c_void, inst: *mut c_void, p: *mut c_void) -> *mut c_void;
+    fn RegisterClassExW(wc: *const u8) -> u16;
+    fn ShowWindow(h: *mut c_void, cmd: i32) -> i32;
+    fn SetWindowTextW(h: *mut c_void, t: *const u16) -> i32;
+    fn SetForegroundWindow(h: *mut c_void) -> i32;
+    fn IsWindow(h: *mut c_void) -> i32;
     fn IsWindowUnicode(h: *mut c_void) -> i32;
     fn GetWindowLongPtrA(h: *mut c_void, i: i32) -> isize;
     fn GetWindowLongPtrW(h: *mut c_void, i: i32) -> isize;
@@ -392,4 +398,138 @@ pub fn reset_for_tests() {
     st.hooks = 0;
     st.init_done = false;
     st.clsid = CLSID_HOOKS;
+}
+
+pub fn test_run() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("TOMBOX_TEST_RUN").map(|v| v == "1").unwrap_or(false))
+}
+
+pub const TEST_TITLE_PREFIX: &str = "[TEST RUN - input disabled] ";
+const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+
+pub fn utf8_to_wide(p: *const u8) -> Option<Vec<u16>> {
+    if p.is_null() {
+        return None;
+    }
+    let mut n = 0usize;
+    while unsafe { *p.add(n) } != 0 {
+        n += 1;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(p, n) };
+    let mut w: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();
+    w.push(0);
+    Some(w)
+}
+
+fn is_atom(p: *const u8) -> bool {
+    (p as usize) >> 16 == 0
+}
+
+pub fn window_title(name: Option<&[u16]>, test: bool) -> Option<Vec<u16>> {
+    if !test {
+        return name.map(|n| n.to_vec());
+    }
+    let mut w: Vec<u16> = TEST_TITLE_PREFIX.encode_utf16().collect();
+    if let Some(n) = name {
+        w.extend(n.iter().copied().take_while(|&c| c != 0));
+    }
+    w.push(0);
+    Some(w)
+}
+
+fn wide_slice(p: *const u16) -> Option<Vec<u16>> {
+    if p.is_null() {
+        return None;
+    }
+    let mut n = 0usize;
+    while unsafe { *p.add(n) } != 0 {
+        n += 1;
+    }
+    let mut v = unsafe { core::slice::from_raw_parts(p, n) }.to_vec();
+    v.push(0);
+    Some(v)
+}
+
+unsafe fn create_window_w(ex: u32, cls: *const u16, name: Option<Vec<u16>>, style: u32, x: i32, y: i32, w: i32, h: i32, parent: *mut c_void, menu: *mut c_void, inst: *mut c_void, p: *mut c_void) -> *mut c_void {
+    let test = test_run() && parent.is_null();
+    let title = window_title(name.as_deref(), test);
+    let ex = if test { ex | WS_EX_NOACTIVATE } else { ex };
+    let hwnd = CreateWindowExW(ex, cls, title.as_ref().map(|t| t.as_ptr()).unwrap_or(core::ptr::null()), style, x, y, w, h, parent, menu, inst, p);
+    if test && !hwnd.is_null() {
+        let mut plain = name.unwrap_or_default();
+        if plain.last() != Some(&0) {
+            plain.push(0);
+        }
+        TEST_WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).push((hwnd as usize, plain));
+            }
+    hwnd
+}
+
+static TEST_WINDOWS: std::sync::Mutex<Vec<(usize, Vec<u16>)>> = std::sync::Mutex::new(Vec::new());
+
+fn restore_test_windows() {
+    let wins: Vec<(usize, Vec<u16>)> = core::mem::take(&mut *TEST_WINDOWS.lock().unwrap_or_else(|e| e.into_inner()));
+    for (h, title) in wins {
+        let h = h as *mut c_void;
+        unsafe {
+            if IsWindow(h) == 0 {
+                continue;
+            }
+            let ex = GetWindowLongPtrW(h, -20);
+            SetWindowLongPtrW(h, -20, ex & !(WS_EX_NOACTIVATE as isize));
+            SetWindowTextW(h, title.as_ptr());
+            SetForegroundWindow(h);
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn mux_CreateWindowExW(ex: u32, cls: *const u16, name: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32, parent: *mut c_void, menu: *mut c_void, inst: *mut c_void, p: *mut c_void) -> *mut c_void {
+    create_window_w(ex, cls, wide_slice(name), style, x, y, w, h, parent, menu, inst, p)
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn mux_CreateWindowExA(ex: u32, cls: *const u8, name: *const u8, style: u32, x: i32, y: i32, w: i32, h: i32, parent: *mut c_void, menu: *mut c_void, inst: *mut c_void, p: *mut c_void) -> *mut c_void {
+    let wcls = if is_atom(cls) { None } else { utf8_to_wide(cls) };
+    let cls_ptr = wcls.as_ref().map(|c| c.as_ptr()).unwrap_or(cls as *const u16);
+    create_window_w(ex, cls_ptr, utf8_to_wide(name), style, x, y, w, h, parent, menu, inst, p)
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn mux_RegisterClassExA(wc: *const u8) -> u16 {
+    if wc.is_null() {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let mut w = [0u8; 80];
+    core::ptr::copy_nonoverlapping(wc, w.as_mut_ptr(), 80);
+    let rd = |o: usize| u64::from_le_bytes(w[o..o + 8].try_into().unwrap()) as *const u8;
+    let menu = rd(56);
+    let cls = rd(64);
+    let wmenu = if menu.is_null() || is_atom(menu) { None } else { utf8_to_wide(menu) };
+    let wcls = if cls.is_null() || is_atom(cls) { None } else { utf8_to_wide(cls) };
+    if let Some(m) = wmenu.as_ref() {
+        w[56..64].copy_from_slice(&(m.as_ptr() as u64).to_le_bytes());
+    }
+    if let Some(c) = wcls.as_ref() {
+        w[64..72].copy_from_slice(&(c.as_ptr() as u64).to_le_bytes());
+    }
+    RegisterClassExW(w.as_ptr())
+}
+
+pub fn show_cmd(cmd: i32, test: bool) -> i32 {
+    if !test {
+        return cmd;
+    }
+    match cmd {
+        1 | 9 | 10 => 4,
+        3 | 5 => 8,
+        c => c,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn mux_ShowWindow(h: *mut c_void, cmd: i32) -> i32 {
+    ShowWindow(h, show_cmd(cmd, test_run() && !crate::queue::taken_over()))
 }

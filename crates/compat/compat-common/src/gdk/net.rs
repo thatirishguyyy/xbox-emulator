@@ -279,12 +279,7 @@ unsafe extern "system" fn unregister_port(_t: This, token: u64, _wait: bool) -> 
 }
 
 pub fn notify_connectivity_changed() {
-    HINT_CHANGED.fire(None, |r| unsafe {
-        let mut hint = [0u8; 16];
-        connectivity_hint(core::ptr::null(), hint.as_mut_ptr());
-        let cb: unsafe extern "system" fn(*mut c_void, *const u8) = core::mem::transmute(r.cb);
-        cb(r.ctx as *mut c_void, hint.as_ptr());
-    });
+    HINT_CHANGED.fire(None, |r| unsafe { deliver_hint(r) });
 }
 
 pub unsafe extern "system" fn connectivity_hint(_t: This, out: *mut u8) -> i32 {
@@ -303,8 +298,25 @@ pub unsafe extern "system" fn connectivity_hint(_t: This, out: *mut u8) -> i32 {
     S_OK
 }
 
+unsafe fn deliver_hint(r: &super::events::Reg) {
+    let mut hint = [0u8; 16];
+    connectivity_hint(core::ptr::null(), hint.as_mut_ptr());
+    let cb: unsafe extern "system" fn(*mut c_void, *const u8) = core::mem::transmute(r.cb);
+    cb(r.ctx as *mut c_void, hint.as_ptr());
+}
+
 unsafe extern "system" fn register_hint(_t: This, queue: usize, ctx: *mut c_void, cb: usize, token: *mut u64) -> i32 {
-    HINT_CHANGED.register(0, queue, ctx, cb, token)
+    let hr = HINT_CHANGED.register(0, queue, ctx, cb, token);
+    if hr < 0 {
+        return hr;
+    }
+    let t = *token;
+    let sub = HINT_CHANGED.fire_token(t, |r| unsafe {
+        deliver_hint(r);
+        log("XNetworkingRegisterConnectivityHintChanged", &format!("token={} initial hint level={} networkInitialized=1 delivered", r.token, connectivity_level()));
+    });
+    log("XNetworkingRegisterConnectivityHintChanged", &format!("queue={queue:#x} token={t} -> initial hint queued hr={sub:#010x}"));
+    hr
 }
 
 unsafe extern "system" fn unregister_hint(_t: This, token: u64, _wait: bool) -> bool {

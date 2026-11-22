@@ -3,7 +3,7 @@ name = "xdxr"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the Xbox console xdxr.dll (DXR runtime behind xgs12_10): XDXRCreateDevice forwarded to the console's own xdxr.dll, loaded on PC with the emulator xmem.dll serving its XMemAlloc/XMemFree imports."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

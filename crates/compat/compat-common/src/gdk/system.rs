@@ -24,7 +24,32 @@ extern "system" {
 
 pub fn console_id() -> String {
     let x = super::user::user().xuid;
-    format!("{:016X}.{:016X}.{:04X}", x, x.rotate_left(17) ^ 0x5842_4F58_454D_5500, (x & 0xffff) as u16)
+    let y = x.rotate_left(17) ^ 0x5842_4F58_454D_5500;
+    format!("{:08X}.{:08X}.{:08X}.{:08X}.{:02X}", (x >> 32) as u32, x as u32, (y >> 32) as u32, y as u32, (x ^ y) as u8)
+}
+
+pub const CONSOLE_ID_BYTES: usize = 0x27;
+pub const SANDBOX_ID_BYTES: usize = 0x10;
+pub const APP_DEVICE_ID_BYTES: usize = 0x2d;
+
+fn field(s: &str, n: usize) -> Vec<u8> {
+    let mut v = vec![0u8; n];
+    let b = s.as_bytes();
+    let k = b.len().min(n - 1);
+    v[..k].copy_from_slice(&b[..k]);
+    v
+}
+
+unsafe fn put_field(s: &str, n: usize, fixed_used: bool, size: usize, buf: *mut u8, used: *mut usize) -> i32 {
+    if size < n {
+        return super::E_NOT_SUFFICIENT_BUFFER;
+    }
+    let v = field(s, n);
+    core::ptr::copy_nonoverlapping(v.as_ptr(), buf, n);
+    if !used.is_null() {
+        *used = if fixed_used { n } else { v.iter().position(|&c| c == 0).unwrap_or(n - 1) + 1 };
+    }
+    S_OK
 }
 
 pub fn sandbox_id() -> String {
@@ -36,11 +61,11 @@ pub fn device_form() -> &'static str {
 }
 
 unsafe extern "system" fn get_console_id(_t: This, size: usize, buf: *mut u8, used: *mut usize) -> i32 {
-    put_str(&console_id(), size, buf, used)
+    put_field(&console_id(), CONSOLE_ID_BYTES, true, size, buf, used)
 }
 
 unsafe extern "system" fn get_sandbox_id(_t: This, size: usize, buf: *mut u8, used: *mut usize) -> i32 {
-    put_str(&sandbox_id(), size, buf, used)
+    put_field(&sandbox_id(), SANDBOX_ID_BYTES, false, size, buf, used)
 }
 
 pub fn analytics_bytes() -> [u8; 144] {
@@ -78,19 +103,19 @@ unsafe extern "system" fn get_title_id(_t: This, out: *mut u32) -> i32 {
 pub fn app_device_id() -> String {
     let seed = format!("{}|{}", console_id(), title().publisher);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut out = String::new();
+    let mut raw = Vec::with_capacity(32);
     for round in 0..4u64 {
         for b in seed.bytes().chain(round.to_le_bytes()) {
             h ^= b as u64;
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        out.push_str(&format!("{h:016X}"));
+        raw.extend_from_slice(&h.to_be_bytes());
     }
-    out
+    crate::online::util::b64(&raw)
 }
 
 unsafe extern "system" fn get_app_device_id(_t: This, size: usize, buf: *mut u8, used: *mut usize) -> i32 {
-    put_str(&app_device_id(), size, buf, used)
+    put_field(&app_device_id(), APP_DEVICE_ID_BYTES, false, size, buf, used)
 }
 
 pub(crate) fn split_args(s: &str) -> Vec<String> {
@@ -258,14 +283,29 @@ pub fn pls_prompt_result(requested: u64, available: u64) -> i32 {
     if available >= requested { S_OK } else { E_ABORT }
 }
 
+pub const PLS_PROMPT_MIN_BYTES: u64 = 0xa0_0000;
+
+pub fn pls_prompt_needed(requested: u64, free: u64) -> u64 {
+    if requested > free { requested - free } else { PLS_PROMPT_MIN_BYTES }
+}
+
+pub fn pls_prompt_check(requested: u64, total: u64) -> i32 {
+    if requested > total { E_INVALIDARG } else { S_OK }
+}
+
 unsafe extern "system" fn pls_prompt_async(_t: This, requested: u64, block: *mut core::ffi::c_void) -> i32 {
+    let (_, _, total) = pls_space();
+    let hr = pls_prompt_check(requested, total);
+    if hr < 0 {
+        return hr;
+    }
     xasync::run_with(
         block,
         OP_PLS_PROMPT,
         Box::new(move |_c| {
-            let (avail, _, _) = pls_space();
+            let (avail, free, _) = pls_space();
             let hr = pls_prompt_result(requested, avail);
-            log("XPersistentLocalStoragePromptUserForSpaceAsync", &format!("requested {requested} bytes, available {avail} -> {hr:#010x} (no space-prompt UI on PC)"));
+            log("XPersistentLocalStoragePromptUserForSpaceAsync", &format!("requested {requested} bytes, free {free}, manage-space ask {} bytes, available {avail} -> {hr:#010x} (no manage-space UI on PC)", pls_prompt_needed(requested, free)));
             xasync::Payload::status(hr)
         }),
     )

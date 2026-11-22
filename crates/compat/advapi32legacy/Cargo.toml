@@ -3,7 +3,7 @@ name = "advapi32legacy"
 version = "0.1.0"
 edition = "2021"
 description = "Compat DLL for the console advapi32legacy.dll: PE forwarders to the identical PC advapi32 (staged beside it as advapi32_sys.dll, so nothing binds back to the compat advapi32.dll) and KernelBase functions, and the console-only Elf* event-log NTSTATUS entry points implemented from the console disassembly."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 build = "build.rs"
 
 [lib]

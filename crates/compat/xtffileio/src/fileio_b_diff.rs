@@ -474,16 +474,20 @@ pub unsafe fn calculate_incremental_changes(session: Session, request: *mut c_vo
             Ok(t) => t,
             Err(e) => break 'reply e,
         };
-        if req.collision_table_size != 0 {
-            loop {
-                let m = match session.receive_more(DELTA_RECEIVE_TIMEOUT) {
-                    Ok(m) => m,
-                    Err(e) => break 'reply e,
-                };
-                if let Err(e) = binary_body(m.0) {
-                    break 'reply e;
-                }
+        let mut collisions: Vec<u8> = Vec::with_capacity(req.collision_table_size as usize);
+        while collisions.len() < req.collision_table_size as usize {
+            let m = match session.receive_more(DELTA_RECEIVE_TIMEOUT) {
+                Ok(m) => m,
+                Err(e) => break 'reply e,
+            };
+            let (p, n) = match binary_body(m.0) {
+                Ok(v) => v,
+                Err(e) => break 'reply e,
+            };
+            if n == 0 || collisions.len() + n as usize > req.collision_table_size as usize {
+                break 'reply E_INVALIDARG;
             }
+            collisions.extend_from_slice(binary_slice(p, n));
         }
         timer.mark("Network");
         let table: Vec<DeltaEntry> = raw.chunks_exact(DELTA_ENTRY_SIZE).map(DeltaEntry::from_bytes).collect();
@@ -492,11 +496,12 @@ pub unsafe fn calculate_incremental_changes(session: Session, request: *mut c_vo
         if hr < 0 {
             break 'reply hr;
         }
-        set_binary(response, &result.bytes())
+        let bytes = result.bytes();
+        (vt::<MessageVtbl>(response).set_binary_body)(response, bytes.len() as u32, bytes.as_ptr())
     };
     timer.merge(rb.0);
     set_i32(rb.0, "Result", hr);
     set_u32(rb.0, "FilesDeleted", stats.files_deleted);
     set_u32(rb.0, "DirectoriesDeleted", stats.dirs_deleted);
-    serialize_object(rb.0, response)
+    serialize_response_object(rb.0, response)
 }

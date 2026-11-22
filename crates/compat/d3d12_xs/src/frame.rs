@@ -102,6 +102,7 @@ static FLIPPED: Mutex<Vec<(u64, i64, i64)>> = Mutex::new(Vec::new());
 static LAST_ORIGIN_QPC: AtomicI64 = AtomicI64::new(0);
 static WAKE: OnceLock<isize> = OnceLock::new();
 static TIMER_STARTED: AtomicBool = AtomicBool::new(false);
+static PRESENTED: AtomicBool = AtomicBool::new(false);
 const FLIPPED_KEEP: usize = 64;
 
 pub fn qpc() -> i64 {
@@ -287,11 +288,28 @@ fn timer_thread() {
             unsafe { WaitForMultipleObjects(1, &wake, 0, u32::MAX) };
             continue;
         };
+        let uncapped = crate::frame_fast::uncapped();
+        if uncapped && PRESENTED.swap(false, Ordering::AcqRel) {
+            let mut order: Vec<usize> = (0..pl.events.len()).collect();
+            order.sort_by_key(|&i| (pl.events[i].0 != 0, pl.events[i].1));
+            for i in order {
+                let (ty, _, internal, dups) = &pl.events[i];
+                if !with(|p| p.generation == pl.generation && p.types[*ty].scheduled) {
+                    continue;
+                }
+                let t = qpc();
+                last[*ty] = t;
+                fire(*ty, *internal, dups, t, t, &mut origins);
+            }
+            continue;
+        }
         let now = qpc();
         let mut best: Option<(i64, usize)> = None;
         for (i, (ty, off, _, _)) in pl.events.iter().enumerate() {
             let (mut d, _) = next_deadline(pl.base, pl.interval, *off, now - 1);
-            if d - last[*ty] < pl.interval / 2 {
+            if uncapped && last[*ty] > i64::MIN / 2 {
+                d = (last[*ty] + pl.interval).max(now);
+            } else if d - last[*ty] < pl.interval / 2 {
                 d += pl.interval;
             }
             if best.map(|b| d < b.0).unwrap_or(true) {
@@ -307,28 +325,36 @@ fn timer_thread() {
         if !still {
             continue;
         }
-        last[*ty] = deadline;
-        let t = qpc();
-        if *ty == 0 {
-            origins += 1;
-            if origins % 120 == 0 {
-                resync_to_host();
-            }
+        last[*ty] = if uncapped { qpc() } else { deadline };
+        fire(*ty, *internal, dups, qpc(), deadline, &mut origins);
+    }
+}
+
+fn fire(ty: usize, internal: isize, dups: &[isize], t: i64, deadline: i64, origins: &mut u64) {
+    if ty == 0 {
+        *origins += 1;
+        if *origins % 120 == 0 {
+            resync_to_host();
         }
-        if *ty == 0 {
-            LAST_ORIGIN_QPC.store(t, Ordering::Relaxed);
+        LAST_ORIGIN_QPC.store(t, Ordering::Relaxed);
+    }
+    unsafe {
+        if ty == 0 {
+            ReleaseSemaphore(internal, 1, core::ptr::null_mut());
+        } else {
+            SetEvent(internal);
         }
-        unsafe {
-            if *ty == 0 {
-                ReleaseSemaphore(*internal, 1, core::ptr::null_mut());
-            } else {
-                SetEvent(*internal);
-            }
-            for &h in dups {
-                signal(h);
-            }
+        for &h in dups {
+            signal(h);
         }
-        crate::perf::on_frame_event(*ty, t, t - deadline);
+    }
+    crate::perf::on_frame_event(ty, t, t - deadline);
+}
+
+pub fn on_present() {
+    if TIMER_STARTED.load(Ordering::Relaxed) && crate::frame_fast::uncapped() {
+        PRESENTED.store(true, Ordering::Release);
+        kick_timer();
     }
 }
 

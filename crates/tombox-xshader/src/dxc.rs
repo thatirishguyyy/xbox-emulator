@@ -123,24 +123,99 @@ pub fn compile_with(hlsl: &str, profile: &str, extra: &[&str]) -> Result<Vec<u8>
     if minor < 2 || extra.contains(&"-denorm") {
         return compile_args(hlsl, profile, &[], extra);
     }
-    let code = compile_args(hlsl, profile, &["-denorm", "preserve"], extra)?;
+    let bf = branch_free_source(hlsl);
+    let code = compile_bf(hlsl, bf.as_deref(), profile, &["-denorm", "preserve"], extra)?;
     if profile.starts_with("cs_") && disassemble(&code).map(|t| has_preserve_unselectable(&t)).unwrap_or(false) {
-        return compile_args(hlsl, profile, &["-denorm", "any"], extra);
+        return compile_bf(hlsl, bf.as_deref(), profile, &["-denorm", "any"], extra);
     }
     Ok(code)
 }
 
-pub fn compile_fma(hlsl: &str, profile: &str, fma: crate::shader_cache::Fma, extra: &[&str]) -> Result<Vec<u8>, String> {
-    let with = |on: bool| -> Vec<&str> { if on { extra.iter().copied().chain(["-D", "TB_FAST_FMA"]).collect() } else { extra.to_vec() } };
-    let minor = profile.rsplit('_').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0);
-    if minor < 2 {
-        return compile_args(hlsl, profile, &[], &with(fma.any));
+pub fn fma_defines(fma: crate::shader_cache::Fma, any_mode: bool) -> Vec<&'static str> {
+    let mut d = Vec::new();
+    if if any_mode { fma.any } else { fma.preserve } {
+        d.extend(["-D", "TB_FAST_FMA"]);
+    } else if any_mode && fma.hybrid {
+        d.extend(["-D", "TB_HYBRID_FMA"]);
     }
-    let code = compile_args(hlsl, profile, &["-denorm", "preserve"], &with(fma.preserve))?;
+    if fma.f2h {
+        d.extend(["-D", "TB_FAST_F2H", "-enable-16bit-types"]);
+    }
+    d
+}
+
+pub fn compile_fma(hlsl: &str, profile: &str, fma: crate::shader_cache::Fma, extra: &[&str]) -> Result<Vec<u8>, String> {
+    let minor = profile.rsplit('_').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0);
+    let fma = crate::shader_cache::Fma { f2h: fma.f2h && minor >= 2, ..fma };
+    let with = |any_mode: bool| -> Vec<&str> { extra.iter().copied().chain(fma_defines(fma, any_mode)).collect() };
+    let bf = branch_free_source(hlsl);
+    if minor < 2 {
+        return compile_bf(hlsl, bf.as_deref(), profile, &[], &with(true));
+    }
+    let early = (profile.starts_with("cs_") && cs_parallel_enabled() && may_need_denorm_any(hlsl)).then(|| {
+        let (h, b, p) = (hlsl.to_string(), bf.clone(), profile.to_string());
+        let args: Vec<String> = with(true).into_iter().map(String::from).collect();
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                compile_bf(&h, b.as_deref(), &p, &["-denorm", "any"], &a)
+            })
+            .ok()
+    }).flatten();
+    let code = compile_bf(hlsl, bf.as_deref(), profile, &["-denorm", "preserve"], &with(false))?;
     if profile.starts_with("cs_") && disassemble(&code).map(|t| has_preserve_unselectable(&t)).unwrap_or(false) {
-        return compile_args(hlsl, profile, &["-denorm", "any"], &with(fma.any));
+        if let Some(r) = early.and_then(|t| t.join().ok()) {
+            return r;
+        }
+        return compile_bf(hlsl, bf.as_deref(), profile, &["-denorm", "any"], &with(true));
     }
     Ok(code)
+}
+
+pub fn cs_parallel_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TOMBOX_DXC_CS_PARALLEL").map(|v| v != "0").unwrap_or(true))
+}
+
+pub fn may_need_denorm_any(hlsl: &str) -> bool {
+    let r = crate::shader_cache::reduced(hlsl);
+    let b = r.as_bytes();
+    ["log", "log2", "log10", "sqrt", "pow", "length", "distance", "refract"].iter().any(|n| {
+        r.match_indices(n).any(|(i, _)| {
+            let before = i.checked_sub(1).map(|k| b[k]).unwrap_or(b' ');
+            let after = &r[i + n.len()..];
+            !(before.is_ascii_alphanumeric() || before == b'_' || before == b'.') && after.trim_start().starts_with('(')
+        })
+    })
+}
+
+pub fn branch_free_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TOMBOX_DXC_BRANCH_FREE").map(|v| v != "0").unwrap_or(true))
+}
+
+fn branch_free_source(hlsl: &str) -> Option<String> {
+    if !branch_free_enabled() {
+        return None;
+    }
+    let r = crate::branch_free::rewrite(hlsl);
+    (r.len() != hlsl.len() + crate::branch_free::PRELUDE.len() || r[crate::branch_free::PRELUDE.len()..] != *hlsl).then_some(r)
+}
+
+fn compile_bf(hlsl: &str, bf: Option<&str>, profile: &str, denorm: &[&str], extra: &[&str]) -> Result<Vec<u8>, String> {
+    if let Some(src) = bf {
+        match compile_args(src, profile, denorm, extra) {
+            Ok(c) => return Ok(c),
+            Err(e) => {
+                static WARNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                if WARNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                    eprintln!("dxc: branch-free source failed, compiling the original: {}", e.lines().next().unwrap_or(""));
+                }
+            }
+        }
+    }
+    compile_args(hlsl, profile, denorm, extra)
 }
 
 pub fn compile_denorm(hlsl: &str, profile: &str, denorm: &str, extra: &[&str]) -> Result<Vec<u8>, String> {
@@ -322,6 +397,42 @@ mod tests {
             let (preserve, text) = denorm_of(&cs(body), "cs_6_2");
             assert!(has_preserve_unselectable(&text), "{body}: expected a Log/Sqrt op");
             assert!(!preserve, "{body}: compute shader with Log/Sqrt still compiled with fp32 denorm preserve");
+        }
+    }
+
+    #[test]
+    fn denorm_any_prediction_follows_reachable_intrinsics() {
+        assert!(may_need_denorm_any(&cs("log2(x)")));
+        assert!(may_need_denorm_any(&cs("length(float2(x, y))")));
+        assert!(!may_need_denorm_any(&cs("exp2(x) * rsqrt(y)")));
+        assert!(!may_need_denorm_any(&cs("tb_log_x + x.length")));
+    }
+
+    #[test]
+    fn parallel_compute_compile_matches_the_sequential_flow_byte_for_byte() {
+        let fma = crate::shader_cache::Fma { preserve: true, any: false, hybrid: false, f2h: false };
+        for body in ["log2(x)", "sqrt(x) + y", "pow(x, y)", "length(float2(x, y))", "exp2(x) * rsqrt(y)"] {
+            let src = cs(body);
+            let par = compile_fma(&src, "cs_6_2", fma, &[]).expect("parallel flow");
+            let pre = compile_args(&src, "cs_6_2", &["-denorm", "preserve"], &fma_defines(fma, false)).expect("preserve");
+            let seq = if disassemble(&pre).map(|t| has_preserve_unselectable(&t)).unwrap_or(false) {
+                compile_args(&src, "cs_6_2", &["-denorm", "any"], &fma_defines(fma, true)).expect("any")
+            } else {
+                pre
+            };
+            let bf = branch_free_source(&src);
+            let seq_bf = match &bf {
+                Some(b) => {
+                    let pre = compile_args(b, "cs_6_2", &["-denorm", "preserve"], &fma_defines(fma, false)).expect("preserve bf");
+                    if disassemble(&pre).map(|t| has_preserve_unselectable(&t)).unwrap_or(false) {
+                        compile_args(b, "cs_6_2", &["-denorm", "any"], &fma_defines(fma, true)).expect("any bf")
+                    } else {
+                        pre
+                    }
+                }
+                None => seq,
+            };
+            assert!(par == seq_bf, "{body}: parallel compute compile differs from the sequential flow");
         }
     }
 

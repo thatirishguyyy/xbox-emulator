@@ -43,4 +43,5 @@ foreach ($o in $other) { Write-Host ("  ERROR {0}" -f $o) -ForegroundColor Red }
 foreach ($n in $noDll) { Write-Host ("  NO DLL {0} -> {1}" -f $n.Crate, $n.Built) -ForegroundColor Yellow }
 if ($code -ne 0 -and -not ($failed.Count -or $other.Count)) { Write-Host '  cargo failed without a parsed error; read the log' -ForegroundColor Red }
 if ($code -ne 0 -or $failed.Count -or $other.Count -or $noDll.Count) { exit 1 }
+if ($env:TOMBOX_FILL_PACK -ne '0') { & (Join-Path $PSScriptRoot 'fill_pack.ps1') -TargetDir 'D:\TomBox\target' -Profile 'release' }
 exit 0

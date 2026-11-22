@@ -12,14 +12,7 @@ pub fn wide(s: &str) -> Vec<u16> {
 }
 
 pub fn built(file: &str) -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let mut dirs: Vec<PathBuf> = std::env::var_os("CARGO_TARGET_DIR").map(|d| vec![PathBuf::from(d).join("debug")]).unwrap_or_default();
-    dirs.extend(exe.ancestors().skip(1).flat_map(|a| [a.to_path_buf(), a.join("debug")]));
-    dirs.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("..").join("target").join("debug"));
-    dirs.into_iter()
-        .map(|d| d.join(file))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| panic!("{file} not built; run cargo build -p for this crate before cargo test"))
+    xone_exports::build_cdylib(env!("CARGO"), env!("CARGO_MANIFEST_DIR"), env!("CARGO_PKG_NAME"), file)
 }
 
 pub fn load_built(file: &str, alias: &str) -> *mut c_void {

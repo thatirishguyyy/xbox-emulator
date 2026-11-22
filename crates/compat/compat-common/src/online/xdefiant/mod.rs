@@ -529,6 +529,21 @@ impl XDefiant {
                     None => ubi_error(404, 1008, "No websocket connection is open for this profile"),
                 }
             }
+            ("PUT" | "POST" | "PATCH", ["profiles", "connections", cid]) => {
+                let owner = store::all_connections().into_iter().find(|c| c["connectionId"].as_str().map_or(false, |x| x.eq_ignore_ascii_case(cid))).and_then(|c| c["profileId"].as_str().map(|s| s.to_string()));
+                match owner {
+                    None => ubi_error(404, 1008, "No websocket connection is open with this connection id"),
+                    Some(p) if !p.eq_ignore_ascii_case(&self.profile_id) => ubi_error(403, 1100, "The connection belongs to another profile"),
+                    Some(_) => match store::update_connection(&self.profile_id, Some(cid), body()) {
+                        Some(c) => Response::json(&c),
+                        None => ubi_error(404, 1008, "No websocket connection is open with this connection id"),
+                    },
+                }
+            }
+            ("GET", ["profiles", "connections", cid]) => match store::all_connections().into_iter().find(|c| c["connectionId"].as_str().map_or(false, |x| x.eq_ignore_ascii_case(cid))) {
+                Some(c) => Response::json(&c),
+                None => ubi_error(404, 1008, "No websocket connection is open with this connection id"),
+            },
 
             ("POST", ["profiles", target, "notifications"]) => Response::json(&self.notify(target, &body(), &self.space(req))),
             ("POST", ["profiles", "notifications"]) => {
