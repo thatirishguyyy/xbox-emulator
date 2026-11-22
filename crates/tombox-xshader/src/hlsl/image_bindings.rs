@@ -5,9 +5,6 @@ use crate::Stage;
 
 impl Emitter<'_> {
     pub(super) fn raw_binding(&self, symbol: Option<Sym>) -> Option<u32> {
-        if !self.is_ms() || self.ex.root_sig.is_some() || self.image_layouts.is_empty() {
-            return None;
-        }
         let (sgpr, offset, kind, dwords) = match symbol {
             Some(Sym::Table(root)) => (root, 0, UserDataKind::Other(0x100), 2),
             Some(Sym::Desc { table, off, k: 0 }) if off & BINDLESS == 0 => {
@@ -15,6 +12,19 @@ impl Emitter<'_> {
             }
             _ => return None,
         };
+        self.mesh_buffer_binding(sgpr, offset, kind, dwords, 4)
+    }
+
+    pub(super) fn constant_binding(&self, table: u8, offset: u32) -> Option<u32> {
+        self.mesh_buffer_binding(table, offset, UserDataKind::ConstantBuffer, 4, 2)
+    }
+
+    fn mesh_buffer_binding(
+        &self, sgpr: u8, offset: u32, kind: UserDataKind, dwords: u8, resource_type: u32,
+    ) -> Option<u32> {
+        if !self.is_ms() || self.ex.root_sig.is_some() || offset & BINDLESS != 0 {
+            return None;
+        }
         let mut agreed = None;
         for layout in self.image_layouts {
             let mut entries = layout.entries.iter().filter(|entry| {
@@ -28,7 +38,7 @@ impl Emitter<'_> {
                 || entry.register > 0xffff
                 || entry.register_space() >= 0x8000
                 || !self.ex.resources.iter().any(|resource| {
-                    resource.res_type == 4
+                    resource.res_type == resource_type
                         && resource.space == entry.register_space()
                         && (resource.lower..=resource.upper).contains(&entry.register)
                 })

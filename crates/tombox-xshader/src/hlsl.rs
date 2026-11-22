@@ -2037,8 +2037,9 @@ impl<'a> Emitter<'a> {
                     // descriptors the load is still treated as a constant buffer (debt).
                     let buffer_kind = if cands.len() == 1 { self.kind_at(cands[0].0, cands[0].1, false)?.filter(|k| *k <= 1) } else { None };
                     for (table, off) in &cands {
-                        let slot = self.bind_id(*table, *off, 32);
-                        if let Some(k) = buffer_kind {
+                        let constant_slot = self.constant_binding(*table, *off);
+                        let slot = constant_slot.unwrap_or_else(|| self.bind_id(*table, *off, 32));
+                        if let Some(k) = buffer_kind.filter(|_| constant_slot.is_none()) {
                             let key = (k == 1, slot);
                             let e = self.sbuf.entry(key).or_insert(0);
                             *e = (*e).max(4);
