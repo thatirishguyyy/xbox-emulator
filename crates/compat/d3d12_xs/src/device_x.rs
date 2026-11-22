@@ -169,7 +169,9 @@ pub fn compute_code(pso: usize) -> Option<Arc<Vec<u8>>> {
 }
 
 pub fn register_compute(pso: *mut c_void, desc: &[u8], code: Arc<Vec<u8>>) {
-    let rec = Arc::new(ComputeRecord { desc: desc[..ps::COMPUTE_DESC_SIZE].to_vec(), code });
+    let mut desc = desc[..ps::COMPUTE_DESC_SIZE].to_vec();
+    desc[0x20..0x30].fill(0);
+    let rec = Arc::new(ComputeRecord { desc, code });
     compute_registry().lock().unwrap().insert(pso as usize, rec);
 }
 

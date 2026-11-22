@@ -564,6 +564,7 @@ unsafe extern "system" fn create_committed_resource(
             None => {}
         }
         unsafe { crate::rtcap::register(*ppv, &desc_copy[..0x38], init_state) };
+        crate::res3d::note_create(unsafe { *ppv }, &desc_copy[..0x38], &format!("committed heapType={heap_type} heapFlags={heap_flags:#x} state={init_state:#x} backing={backing:x?}"));
         if crate::rtcap::enabled() && desc_copy[0] == 1 && !pheap.is_null() {
             let width = u64::from_le_bytes(desc_copy[0x10..0x18].try_into().unwrap());
             unsafe { crate::bindtrace::note_buffer(*ppv, width, *pheap) };
@@ -658,6 +659,8 @@ unsafe fn bisect_gfx_pso(real: *mut c_void, desc: &[u8], riid: *const Guid) -> S
         ("no_input_layout", Box::new(|d: &mut Vec<u8>| { d[0x228..0x238].fill(0); })),
         ("default_raster", Box::new(move |d: &mut Vec<u8>| { put(d, 0x1c4, 3); put(d, 0x1c8, 3); for k in 2..11 { put(d, 0x1c4 + 4 * k, 0); } put(d, 0x1dc, 1); })),
         ("default_blend", Box::new(|d: &mut Vec<u8>| { d[0x78..0x1c0].fill(0); for i in 0..8 { let o = 0x80 + i * 40; d[o + 8..o + 12].copy_from_slice(&2u32.to_le_bytes()); d[o + 12..o + 16].copy_from_slice(&1u32.to_le_bytes()); d[o + 16..o + 20].copy_from_slice(&1u32.to_le_bytes()); d[o + 20..o + 24].copy_from_slice(&2u32.to_le_bytes()); d[o + 24..o + 28].copy_from_slice(&1u32.to_le_bytes()); d[o + 28..o + 32].copy_from_slice(&1u32.to_le_bytes()); d[o + 32..o + 36].copy_from_slice(&4u32.to_le_bytes()); d[o + 36] = 15; } })),
+        ("no_flags", Box::new(move |d: &mut Vec<u8>| put(d, 0x288, 0))),
+        ("no_stream_out", Box::new(|d: &mut Vec<u8>| d[0x58..0x78].fill(0))),
     ];
     let mut out = String::new();
     for (name, m) in variants {
@@ -970,11 +973,24 @@ struct PsoRecord {
     desc: Vec<u8>,
     _shaders: Vec<std::sync::Arc<Vec<u8>>>,
     _layout: Vec<u8>,
+    _names: Vec<Vec<u8>>,
     _so: Vec<u8>,
     _strides: Vec<u8>,
+    root_sig: usize,
 }
-// SAFETY: the raw pointers inside `desc` only reference `_shaders`/`_layout` (owned here)
-// and static title data (root signature object, semantic-name strings).
+
+impl Drop for PsoRecord {
+    fn drop(&mut self) {
+        if self.root_sig != 0 {
+            unsafe {
+                let rel: unsafe extern "system" fn(*mut c_void) -> u32 = core::mem::transmute(*(*(self.root_sig as *const *const usize)).add(2));
+                rel(self.root_sig as *mut c_void);
+            }
+        }
+    }
+}
+// SAFETY: the raw pointers inside `desc` only reference `_shaders`/`_layout`/`_names` (owned here)
+// and the title's root signature object.
 unsafe impl Send for PsoRecord {}
 unsafe impl Sync for PsoRecord {}
 
@@ -988,14 +1004,16 @@ fn pso_registry() -> &'static std::sync::Mutex<std::collections::HashMap<usize, 
 unsafe fn register_pso(pso: *mut c_void, mut desc: Vec<u8>, shaders: Vec<std::sync::Arc<Vec<u8>>>) {
     let ptr = u64::from_le_bytes(desc[0x228..0x230].try_into().unwrap()) as *const u8;
     let n = u32::from_le_bytes(desc[0x230..0x234].try_into().unwrap()) as usize;
-    let layout = if ptr.is_null() || n == 0 || n > 64 {
+    let mut layout = if ptr.is_null() || n == 0 || n > 64 {
         Vec::new()
     } else {
         unsafe { core::slice::from_raw_parts(ptr, n * 32).to_vec() }
     };
+    let names = unsafe { own_semantic_names(&mut layout) };
     if !layout.is_empty() {
         desc[0x228..0x230].copy_from_slice(&(layout.as_ptr() as u64).to_le_bytes());
     }
+    desc[0x278..0x288].fill(0);
     let snap = |d: &mut Vec<u8>, po: usize, no: usize, stride: usize, max: usize| -> Vec<u8> {
         let p = u64::from_le_bytes(d[po..po + 8].try_into().unwrap()) as *const u8;
         let n = u32::from_le_bytes(d[no..no + 4].try_into().unwrap()) as usize;
@@ -1010,8 +1028,37 @@ unsafe fn register_pso(pso: *mut c_void, mut desc: Vec<u8>, shaders: Vec<std::sy
     };
     let so = snap(&mut desc, 0x58, 0x60, 24, 64);
     let strides = snap(&mut desc, 0x68, 0x70, 4, 4);
-    let rec = std::sync::Arc::new(PsoRecord { desc, _shaders: shaders, _layout: layout, _so: so, _strides: strides });
+    let root_sig = u64::from_le_bytes(desc[0..8].try_into().unwrap()) as usize;
+    if root_sig != 0 {
+        unsafe {
+            let add: unsafe extern "system" fn(*mut c_void) -> u32 = core::mem::transmute(*(*(root_sig as *const *const usize)).add(1));
+            add(root_sig as *mut c_void);
+        }
+    }
+    let rec = std::sync::Arc::new(PsoRecord { desc, _shaders: shaders, _layout: layout, _names: names, _so: so, _strides: strides, root_sig });
     pso_registry().lock().unwrap().insert(pso as usize, rec);
+}
+
+unsafe fn own_semantic_names(layout: &mut [u8]) -> Vec<Vec<u8>> {
+    let mut names = Vec::new();
+    for e in layout.chunks_exact_mut(32) {
+        let p = u64::from_le_bytes(e[0..8].try_into().unwrap()) as *const u8;
+        if p.is_null() {
+            continue;
+        }
+        let mut s = Vec::new();
+        while s.len() < 256 {
+            let b = unsafe { *p.add(s.len()) };
+            if b == 0 {
+                break;
+            }
+            s.push(b);
+        }
+        s.push(0);
+        e[0..8].copy_from_slice(&(s.as_ptr() as u64).to_le_bytes());
+        names.push(s);
+    }
+    names
 }
 
 pub(crate) unsafe fn register_gfx_pso(pso: *mut c_void, desc: Vec<u8>, shaders: Vec<std::sync::Arc<Vec<u8>>>) {
@@ -1094,6 +1141,7 @@ unsafe extern "system" fn real_create_cbv(real: *mut c_void, pdesc: *const u8, d
 unsafe extern "system" fn real_create_srv(real: *mut c_void, res: *mut c_void, pdesc: *const u8, dest: usize) {
     let desc = if pdesc.is_null() { None } else { Some(unsafe { core::ptr::read_unaligned(pdesc as *const [u8; 40]) }) };
     crate::bindtrace::note_desc(dest, crate::bindtrace::Desc::Srv { res: res as usize, desc });
+    crate::res3d::note_view(res, "SRV", desc.as_ref(), dest);
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *const u8, usize) = unsafe { core::mem::transmute(real_orig(18)) };
     unsafe { f(real, res, pdesc, dest) };
     crate::bindtrace::note_desc_after(dest, 0, crate::bindtrace::Desc::Srv { res: res as usize, desc });
@@ -1101,6 +1149,7 @@ unsafe extern "system" fn real_create_srv(real: *mut c_void, res: *mut c_void, p
 unsafe extern "system" fn real_create_uav(real: *mut c_void, res: *mut c_void, counter: *mut c_void, pdesc: *const u8, dest: usize) {
     let desc = if pdesc.is_null() { None } else { Some(unsafe { core::ptr::read_unaligned(pdesc as *const [u8; 40]) }) };
     crate::bindtrace::note_desc(dest, crate::bindtrace::Desc::Uav { res: res as usize, desc });
+    crate::res3d::note_view(res, "UAV", desc.as_ref(), dest);
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void, *const u8, usize) = unsafe { core::mem::transmute(real_orig(19)) };
     unsafe { f(real, res, counter, pdesc, dest) };
     crate::bindtrace::note_desc_after(dest, 0, crate::bindtrace::Desc::Uav { res: res as usize, desc });
@@ -1292,6 +1341,9 @@ unsafe extern "system" fn create_derived_pso_x(
         unsafe { register_pso(*ppv, desc, shaders) };
     } else if FAIL.fetch_add(1, Ordering::Relaxed) < 10 {
         record("d3d12_xs", "CreateDerivedPSO_X", &format!("real CreateGraphicsPipelineState FAILED hr={hr:#010x} (tags: {tags})"));
+        let b = unsafe { bisect_gfx_pso(real, &desc, riid) };
+        let hex = |a: usize, n: usize| desc[a..a + n].chunks(4).map(|c| format!("{:x}", u32::from_le_bytes(c.try_into().unwrap()))).collect::<Vec<_>>().join(" ");
+        record("d3d12_xs", "CreateDerivedPSO_X", &format!("failure bisection:{b} | raster[{}] dss[{}] blend0[{}] mask={} flags={:x} topo={} samples={} base_raster[{}]", hex(0x1c4, 0x2c), hex(0x1f0, 0x34), hex(0x78, 0x30), hex(0x1c0, 4), u32::from_le_bytes(desc[0x288..0x28c].try_into().unwrap()), hex(0x23c, 4), hex(0x268, 8), rec.desc[0x1c4..0x1f0].chunks(4).map(|c| format!("{:x}", u32::from_le_bytes(c.try_into().unwrap()))).collect::<Vec<_>>().join(" ")));
     }
     hr
 }
@@ -1449,9 +1501,46 @@ unsafe extern "system" fn create_compute_pso_sync(
             record("d3d12_xs", "CreateComputePSO_X", &format!("compute PSO #{k} created from translated shader"));
         }
     } else if FAIL.fetch_add(1, Ordering::Relaxed) < 10 {
-        record("d3d12_xs", "CreateComputePSO_X", &format!("real CreateComputePipelineState FAILED hr={hr:#010x}"));
+        let src = if p.is_null() || n == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(p, n) } };
+        let h = crate::device_x::fnv64(src);
+        let cached = (u64::from_le_bytes(desc[0x20..0x28].try_into().unwrap()), u64::from_le_bytes(desc[0x28..0x30].try_into().unwrap()));
+        let dir = std::env::temp_dir().join("tombox").join("psodump");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(format!("cs_fail_{h:016x}.xbox")), src);
+        let _ = std::fs::write(dir.join(format!("cs_fail_{h:016x}.dxil")), code.as_slice());
+        record("d3d12_xs", "CreateComputePSO_X", &format!(
+            "real CreateComputePipelineState FAILED hr={hr:#010x} cs={h:016x} in={n}B out={}B root={:#x} cachedPSO={:#x}/{}B flags={:#x} thread={:?} | {} | dumped to {}",
+            code.len(), u64::from_le_bytes(desc[0..8].try_into().unwrap()), cached.0, cached.1,
+            u32::from_le_bytes(desc[0x30..0x34].try_into().unwrap()), std::thread::current().id(), memory_status(), dir.display()));
+        unsafe { crate::cmdlist_x::dump_device_messages(real, "CreateComputePSO_X") };
     }
     hr
+}
+
+#[repr(C)]
+struct MemStatusEx { len: u32, load: u32, total_phys: u64, avail_phys: u64, total_page: u64, avail_page: u64, total_virt: u64, avail_virt: u64, avail_ext: u64 }
+
+#[repr(C)]
+#[derive(Default)]
+struct ProcMemCounters { cb: u32, faults: u32, peak_ws: usize, ws: usize, qpp: usize, qp: usize, qnpp: usize, qnp: usize, pagefile: usize, peak_pagefile: usize, private: usize }
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GlobalMemoryStatusEx(s: *mut MemStatusEx) -> i32;
+    fn K32GetProcessMemoryInfo(p: *mut c_void, c: *mut ProcMemCounters, cb: u32) -> i32;
+    fn GetCurrentProcess() -> *mut c_void;
+}
+
+fn memory_status() -> String {
+    let mb = |v: u64| v >> 20;
+    let mut g = MemStatusEx { len: core::mem::size_of::<MemStatusEx>() as u32, load: 0, total_phys: 0, avail_phys: 0, total_page: 0, avail_page: 0, total_virt: 0, avail_virt: 0, avail_ext: 0 };
+    let mut c = ProcMemCounters { cb: core::mem::size_of::<ProcMemCounters>() as u32, ..Default::default() };
+    let gs = unsafe { GlobalMemoryStatusEx(&mut g) } != 0;
+    let ps = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } != 0;
+    format!(
+        "system commit avail {} of {} MB, phys avail {} of {} MB, process VA avail {} of {} MB{} | process private {} MB (peak pagefile {} MB), working set {} MB{}",
+        mb(g.avail_page), mb(g.total_page), mb(g.avail_phys), mb(g.total_phys), mb(g.avail_virt), mb(g.total_virt), if gs { "" } else { " (GlobalMemoryStatusEx failed)" },
+        mb(c.private as u64), mb(c.peak_pagefile as u64), mb(c.ws as u64), if ps { "" } else { " (GetProcessMemoryInfo failed)" })
 }
 
 /// ID3D12Device::CreateHeap (slot 28). Logs the desc and result; Xbox-only heap flag bits
@@ -1546,6 +1635,7 @@ unsafe extern "system" fn create_placed_resource(
     if hr >= 0 && !ppv.is_null() {
         crate::map_x::ensure_patched(unsafe { *ppv });
         unsafe { crate::gpu_va::note_resource(real, *ppv, &d, init_state, None) };
+        crate::res3d::note_create(unsafe { *ppv }, &d, &format!("placed heap={heap:p}+{offset:#x} state={init_state:#x}"));
     }
     if hr >= 0 && crate::rtcap::enabled() && d[0] == 1 && !ppv.is_null() {
         let width = u64::from_le_bytes(d[0x10..0x18].try_into().unwrap());
@@ -1614,6 +1704,7 @@ unsafe extern "system" fn create_placed_resource_x(
         unsafe { addref(res) };
         unsafe { crate::gpu_va::note_resource(real, res, &d, init_state, Some(va)) };
         crate::placed::register(res, crate::placed::Placed { va, desc: orig, init_state });
+        crate::res3d::note_create(res, &orig, &format!("placedX va={va:#x} {}", match &made { Some(m) => format!("aliased {:?} heap {:#x}+{:#x}", m.kind, m.heap, m.offset), None => "separate committed".to_string() }));
         if flags & 0x7 != 0 {
             unsafe { crate::rtcap::register(res, &d[..0x38], init_state) };
             static RT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);

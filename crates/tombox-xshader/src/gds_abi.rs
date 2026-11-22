@@ -11,6 +11,9 @@ pub const TB_GDS_OA_FIELD_COUNTER_DWORD: u32 = 0;
 pub const TB_GDS_OA_FIELD_CNTL: u32 = 1;
 pub const TB_GDS_OA_FIELD_STAGE: u32 = 2;
 pub const TB_GDS_OA_FIELD_WAVE_RELEASE: u32 = 3;
+pub const TB_GWS_TABLE_DWORD: u32 = TB_GDS_OA_TABLE_DWORD + TB_GDS_OA_COUNTERS * TB_GDS_OA_STRIDE_DWORDS;
+pub const TB_GWS_RESOURCES: u32 = 64;
+pub const TB_GWS_COUNTER_MASK: u32 = (1 << 12) - 1;
 
 pub const fn tb_gds_byte_offset(title_dword: u32) -> u32 {
     title_dword * TB_GDS_BYTES_PER_TITLE_DWORD

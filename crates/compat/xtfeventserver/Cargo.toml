@@ -14,5 +14,8 @@ path = "src/lib.rs"
 [dependencies]
 xtfcommon = { path = "../xtfcommon" }
 
+[dev-dependencies]
+xbtp = { path = "../xbtp" }
+
 [build-dependencies]
 xtfcommon = { path = "../xtfcommon" }

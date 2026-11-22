@@ -190,67 +190,15 @@ fn site(k: usize) {
 #[cfg(not(test))]
 fn site(_: usize) {}
 
-thread_local! {
-    static CARRY: std::cell::Cell<Option<([u8; 64], [bool; 64])>> = const { std::cell::Cell::new(None) };
-    static RSITE: std::cell::Cell<usize> = const { std::cell::Cell::new(9) };
-    static ARR: std::cell::Cell<Option<[u8; 32]>> = const { std::cell::Cell::new(None) };
-}
-
-pub(crate) fn begin() {
-    CARRY.with(|c| c.set(None));
-    ARR.with(|c| c.set(None));
-}
-
-fn arr_row(r: usize, v: [u8; 8]) {
-    ARR.with(|c| {
-        if let Some(mut a) = c.get() {
-            if r < 4 {
-                a[r * 8..r * 8 + 8].copy_from_slice(&v);
-            }
-            c.set(Some(a));
-        }
-    });
-}
-
-fn arr_set(j: usize) {
-    ARR.with(|c| {
-        if let Some(mut a) = c.get() {
-            if j < 32 {
-                a[j] = 1;
-            }
-            c.set(Some(a));
-        }
-    });
-}
-
-pub(crate) const TID_CONST_HI: [u8; 8] = [3, 0, 0, 0, 3, 0, 0, 0];
-
 pub(crate) fn remap(d: &mut Dcc, dst: usize, src: usize, maps: &[Option<(u32, u32)>; 4]) -> Result<(), i32> {
     let meta = d.r32(0x58);
     let s = d.b[src];
     let mut tmp = [0u8; 64];
     let mut ever = [false; 64];
-    let rs = RSITE.with(|r| r.replace(9));
     if maps.iter().any(|m| m.is_some()) {
         if let Some(b) = fed() {
             tmp = b;
             ever = [true; 64];
-        } else if rs == 0 {
-            if let Some(a) = ARR.with(|c| c.get()) {
-                tmp[24..32].copy_from_slice(&a[8..16]);
-                tmp[56..64].copy_from_slice(&TID_CONST_HI);
-                for j in (24..32).chain(56..64) {
-                    ever[j] = true;
-                }
-            }
-        } else if rs == 2 {
-            if let Some((t, e)) = CARRY.with(|c| c.get()) {
-                tmp = t;
-                ever = e;
-                for j in (24..32).chain(56..64) {
-                    ever[j] = false;
-                }
-            }
         }
     }
     for k in 0..4u32 {
@@ -261,10 +209,6 @@ pub(crate) fn remap(d: &mut Dcc, dst: usize, src: usize, maps: &[Option<(u32, u3
         let Some((from, to)) = maps[k as usize] else {
             let u = undef(d, src, k);
             if u && (dst != 2 || differ(meta, k * 64)?) {
-                #[cfg(test)]
-                if std::env::var("TOMBOX_DCC_REMAP_DBG").is_ok() {
-                    println!("remapdbg plain ch {k} dst {dst} src {src} undef");
-                }
                 return Err(E_INVALIDARG);
             }
             d.b[dst][o..o + 64].copy_from_slice(&s[o..o + 64]);
@@ -280,31 +224,22 @@ pub(crate) fn remap(d: &mut Dcc, dst: usize, src: usize, maps: &[Option<(u32, u3
         let holes = ever.iter().any(|&x| !x);
         let tainted = undef(d, src, k);
         if (holes || tainted) && (dst != 2 || differ(meta, k * 64)?) {
-            #[cfg(test)]
-            if std::env::var("TOMBOX_DCC_REMAP_DBG").is_ok() {
-                println!("remapdbg site {rs} ch {k} dst {dst} tainted {tainted} holes {:?}", (0..64).filter(|&j| !ever[j]).collect::<Vec<_>>());
-            }
             return Err(E_INVALIDARG);
         }
         d.b[dst][o..o + 64].copy_from_slice(&tmp);
         mark(d, dst, k, holes || tainted);
-    }
-    if maps.iter().any(|m| m.is_some()) {
-        CARRY.with(|c| c.set(Some((tmp, ever))));
     }
     Ok(())
 }
 
 pub(crate) fn relay(d: &mut Dcc, dst: usize, src: usize, mode: u32) -> Result<(), i32> {
     let from = d.r32(0xf0);
-    let k = match mode {
+    site(match mode {
         2 => 1,
         1 => 2,
         0 => 3,
         _ => 9,
-    };
-    site(k);
-    RSITE.with(|r| r.set(k));
+    });
     remap(d, dst, src, &[Some((from, mode)); 4])?;
     d.w32(0xf0, mode);
     Ok(())
@@ -326,11 +261,6 @@ pub(crate) fn unpack(d: &mut Dcc) -> Result<(), i32> {
     }
     let (sb, s0) = narrow(d);
     let segs = seg_info_checked(meta).ok_or(E_INVALIDARG)?;
-    let mut a = [0u8; 32];
-    for (i, v) in segs.iter().enumerate() {
-        a[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    ARR.with(|c| c.set(Some(a)));
     let old = d.r32(0x5c);
     let mut m5c = 0u32;
     for i in 0..4 {
@@ -435,7 +365,6 @@ fn unpack_segs(d: &mut Dcc, meta: u32, segs: &[u32; 8]) -> Result<bool, i32> {
             let mode = (d.r8(0x12c0) as u32 >> (2 * j)) & 3;
             if mode != 0 {
                 t[jo] = [0; 8];
-                arr_row(jo, [0; 8]);
                 for i in 0..8u32 {
                     let c = get(d, (j * 64 + 8 * i) & 0xff, 4)?;
                     let sm = match mode {
@@ -447,7 +376,6 @@ fn unpack_segs(d: &mut Dcc, meta: u32, segs: &[u32; 8]) -> Result<bool, i32> {
                     if bt(d.r32(0x158 + 4 * jo), i) {
                         let al = a & 0xff;
                         t[(al >> 6) as usize][((al >> 3) & 7) as usize] = 1;
-                        arr_set((al >> 6) as usize * 8 + ((al >> 3) & 7) as usize);
                     }
                 }
             } else {
@@ -455,7 +383,6 @@ fn unpack_segs(d: &mut Dcc, meta: u32, segs: &[u32; 8]) -> Result<bool, i32> {
                 for b in 0..8 {
                     t[jo][b] = ((w >> b) & 1) as u8;
                 }
-                arr_row(jo, t[jo]);
             }
         }
         let lim = (hg + 1) << 6;
@@ -594,7 +521,6 @@ fn tid_body(d: &mut Dcc, meta: u32) -> Result<(), i32> {
         }
     }
     site(0);
-    RSITE.with(|r| r.set(0));
     remap(d, 2, 2, &maps)?;
     for q in 0..8u32 {
         if !seg_bit(d, q >> 1)? || !differ(meta, 32 * q)? {

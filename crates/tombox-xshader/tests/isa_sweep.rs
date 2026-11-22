@@ -344,6 +344,7 @@ fn cs_extract(words: &[u32]) -> ShaderExtract {
         isa,
         isa_offset_in_fssm: 0,
         isa_preamble: [0, LANES as u32, 1, 1],
+        psv_numthreads: None,
         has_input_sig: false,
         has_output_sig: false,
         has_psv0: false,

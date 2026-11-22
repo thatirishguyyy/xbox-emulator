@@ -91,6 +91,17 @@ name = "compat_smoke"
 version = "0.1.0"
 
 [[package]]
+name = "coniosrv"
+version = "0.1.0"
+dependencies = [
+ "compat-common",
+ "coniosrv",
+ "console-image",
+ "console-sandbox",
+ "xone-exports",
+]
+
+[[package]]
 name = "connectedstorageservice_proxystub"
 version = "0.1.0"
 dependencies = [
@@ -1073,6 +1084,7 @@ dependencies = [
 name = "xtfeventserver"
 version = "0.1.0"
 dependencies = [
+ "xbtp",
  "xtfcommon",
 ]
 

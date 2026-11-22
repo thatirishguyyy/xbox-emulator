@@ -162,6 +162,7 @@ unsafe extern "system" fn cl_copy_resource_x(this: *mut c_void, dst: *mut c_void
         }
         Ok(CopyXPlan::Copy) => {
             crate::placed::note_gpu_write(dst);
+            crate::res3d::note(dst as usize, "cl2 CopyResourceX", &format!("src={src:p} flags={flags:#x}"));
             let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) = unsafe { core::mem::transmute(pc_fn(this, PC_SLOT_COPY_RESOURCE)) };
             unsafe { f(this, dst, src) };
         }

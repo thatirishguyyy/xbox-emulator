@@ -124,6 +124,7 @@ fn ps() -> tombox_xshader::ShaderExtract {
         isa,
         isa_offset_in_fssm: 0,
         isa_preamble: [0; 4],
+        psv_numthreads: None,
         has_input_sig: true,
         has_output_sig: true,
         has_psv0: false,

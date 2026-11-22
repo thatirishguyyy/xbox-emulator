@@ -1,0 +1,26 @@
+[package]
+name = "coniosrv"
+version = "0.1.0"
+edition = "2021"
+description = "Compat DLL for the console ConIoSrv.dll (console input/output CSR server DLL): ServerDllInitialization runs the console's own ConIoSrv.dll with every OS import routed to console-sandbox (in-process ALPC port model for ConsoleInputServerPort, emulated PnP keyboard arrival and keyboard devices, the console KBDUS layout, the console device family and the sandboxed registry)."
+license = "GPL-3.0-or-later"
+build = "build.rs"
+
+[lib]
+name = "coniosrv"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+testing = []
+
+[dev-dependencies]
+coniosrv = { path = ".", features = ["testing"] }
+
+[dependencies]
+compat-common = { path = "../compat-common" }
+console-image = { path = "../console-image" }
+console-sandbox = { path = "../console-sandbox" }
+
+[build-dependencies]
+xone-exports = { path = "../xone-exports" }

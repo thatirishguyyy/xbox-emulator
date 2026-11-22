@@ -1848,7 +1848,7 @@
 <rect x="875.00" y="880.00" width="125.00" height="60.00" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="880.00" y="896.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Amplification</text>
 </g>
-<text x="4.00" y="971.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Xbox console libraries: 99.35% (2141/2155)</text>
+<text x="4.00" y="971.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Xbox console libraries: 99.40% (2142/2155)</text>
 <rect x="4" y="982" width="10" height="10" fill="#2ea043"/>
 <text x="18.00" y="991.00" font-family="sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">implemented</text>
 <rect x="109" y="982" width="10" height="10" fill="#388bfd"/>
@@ -2908,8 +2908,8 @@
 <rect x="950.07" y="1802.65" width="33.29" height="25.09" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="955.07" y="1818.65" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">GDK</text>
 </g>
-<g><title>ConIoSrv.dll: 0/1 covered; not imported by an analysed title</title>
-<rect x="984.36" y="1803.65" width="14.64" height="23.09" fill="#6e7681"/>
+<g><title>ConIoSrv.dll: 1/1 covered; not imported by an analysed title</title>
+<rect x="984.36" y="1803.65" width="14.64" height="23.09" fill="#2ea043"/>
 <rect x="983.36" y="1802.65" width="16.64" height="25.09" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="988.36" y="1818.65" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">C</text>
 </g>

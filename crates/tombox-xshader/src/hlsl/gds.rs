@@ -1,6 +1,7 @@
 use super::{mesh, r, Emitter};
-use crate::gds_abi::{TB_GDS_HLSL_DECL, TB_GDS_TITLE_DWORDS};
-use crate::rdna2::Insn;
+use crate::gds_abi::{tb_gds_byte_offset, TB_GDS_HLSL_DECL, TB_GDS_TITLE_DWORDS, TB_GWS_COUNTER_MASK, TB_GWS_RESOURCES, TB_GWS_TABLE_DWORD};
+use crate::rdna2::{Enc, Insn};
+use crate::Stage;
 
 pub(super) fn is_gds(ins: &Insn) -> bool {
     ins.raw.first().is_some_and(|w| (w >> 17) & 1 != 0) || ins.mnemonic.starts_with("ds_gws_") || ins.mnemonic == "ds_ordered_count"
@@ -11,8 +12,55 @@ pub(super) fn gds_header(body: &str) -> Option<&'static str> {
 }
 
 impl Emitter<'_> {
+    fn emit_gws_counter(&mut self, ins: &Insn) -> Result<(), String> {
+        let name = ins.mnemonic.as_str();
+        let [_, x, y, z] = self.ex.isa_preamble;
+        let has_control_flow = self.insns.iter().enumerate().any(|(i, op)| {
+            if op.mnemonic == "s_endpgm" {
+                return i + 1 != self.insns.len();
+            }
+            (op.enc == Enc::Sopp && !matches!(op.mnemonic.as_str(), "s_nop" | "s_waitcnt"))
+                || matches!(op.mnemonic.as_str(), "s_setpc_b64" | "s_swappc_b64")
+        });
+        let threads = x.saturating_mul(y).saturating_mul(z);
+        if self.ex.stage != Stage::Compute || !(1..=1024).contains(&threads) || z > 64
+            || mesh::wave_size(&self.insns) != 32 || has_control_flow
+        {
+            return Err(format!("{name}: the GWS counter model requires a straight-line wave32 compute group"));
+        }
+        if ins.raw[0] & (1 << 17) == 0 || ins.aux.imm & !0x3f != 0 {
+            return Err(format!("{name}: invalid GWS resource encoding"));
+        }
+        let t = self.tmp;
+        self.tmp += 1;
+        let offset = ins.aux.imm;
+        let resource_mask = TB_GWS_RESOURCES - 1;
+        let table = tb_gds_byte_offset(TB_GWS_TABLE_DWORD);
+        self.line(&format!("uint t{t}id = gtid.x + {x}u * (gtid.y + {y}u * gtid.z); uint t{t}wave = t{t}id >> 5u;"));
+        self.line(&format!("if ((t{t}id & 31u) == 0u) tb_gws_counter_first[t{t}wave] = 0xffffffffu;"));
+        self.line("GroupMemoryBarrierWithGroupSync();");
+        self.line(&format!("if ((exec_lo & 1u) != 0u) InterlockedMin(tb_gws_counter_first[t{t}wave], t{t}id);"));
+        self.line("GroupMemoryBarrierWithGroupSync();");
+        self.line(&format!("if (t{t}id == tb_gws_counter_first[t{t}wave]) {{ uint t{t}a = {table}u + 4u * (((m0 >> 16) + {offset}u) & {resource_mask}u);"));
+        let value = if name == "ds_gws_sema_v" {
+            "1u".to_string()
+        } else {
+            let data = &ins.src[1];
+            self.touch(data);
+            format!("({}) & {TB_GWS_COUNTER_MASK}u", r(data)?)
+        };
+        let atomic = if name == "ds_gws_init" { "InterlockedExchange" } else { "InterlockedAdd" };
+        self.line(&format!("uint t{t}old; tb_gds.{atomic}(t{t}a, {value}, t{t}old);"));
+        self.line("}");
+        self.line("AllMemoryBarrierWithGroupSync();");
+        Ok(())
+    }
+
     pub(super) fn emit_gds(&mut self, ins: &Insn) -> Result<(), String> {
         let m = ins.mnemonic.clone();
+        if matches!(m.as_str(), "ds_gws_init" | "ds_gws_sema_v" | "ds_gws_sema_br") {
+            return self.emit_gws_counter(ins);
+        }
         if m.starts_with("ds_gws_") {
             return Err(format!("{m}: global wave sync counts hardware waves across thread groups; no lowering in the one-lane-per-thread model"));
         }

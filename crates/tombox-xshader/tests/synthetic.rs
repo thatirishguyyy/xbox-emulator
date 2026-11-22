@@ -39,6 +39,7 @@ fn shader(stage: Stage, words: &[u32], input_sig: Vec<SigElement>, output_sig: V
         isa,
         isa_offset_in_fssm: 0,
         isa_preamble: [0; 4],
+        psv_numthreads: None,
         has_input_sig: true,
         has_output_sig: true,
         has_psv0: false,
@@ -300,6 +301,44 @@ fn loops_translate_deterministically() {
 }
 
 #[test]
+fn vertex_fetch_packs_read_attributes_into_consecutive_vgprs() {
+    let words = [
+        0xbe84_2104,
+        0xf800_00cf, 0x0706_0504,
+        0xf800_0a0f, 0x0b0a_0908,
+        S_ENDPGM,
+    ];
+    let mut position = sig("POSITION", 0, 3, 0, 0x3);
+    position.rw_mask = 0x3;
+    let unused = sig("NORMAL", 0, 3, 1, 0xf);
+    let mut attribute = sig("TEXCOORD", 0, 1, 3, 0x4);
+    attribute.rw_mask = 0x4;
+    let ex = shader(
+        Stage::Vertex,
+        &words,
+        vec![position, unused, attribute],
+        vec![sig("SV_Position", 1, 3, 0, 0xf), sig("TEXCOORD", 0, 1, 1, 0xf)],
+        None,
+    );
+    let t = translate(&ex).expect("vertex fetch translates");
+    for assignment in [
+        "v4 = asuint(i.i0.x);",
+        "v5 = asuint(i.i0.y);",
+        "v6 = 0u;",
+        "v7 = 0x3f800000u;",
+        "v8 = 0u;",
+        "v9 = 0u;",
+        "v10 = (uint)(i.i2.x);",
+        "v11 = 0x3f800000u;",
+    ] {
+        assert!(t.hlsl.contains(assignment), "missing {assignment}\n{}", t.hlsl);
+    }
+    assert!(!t.hlsl.contains("i.i1."), "{}", t.hlsl);
+    #[cfg(windows)]
+    tombox_xshader::dxc::compile(&t.hlsl, &tombox_xshader::dxc::profile_for(t.profile)).unwrap();
+}
+
+#[test]
 fn vertex_misc_vector_export_feeds_the_render_target_array_index() {
     let words = [0xf800_00cf, 0x0403_0200, 0xf800_08df, 0x0200_0101, S_ENDPGM];
     let ex = shader(
@@ -312,6 +351,29 @@ fn vertex_misc_vector_export_feeds_the_render_target_array_index() {
     let t = translate(&ex).expect("POS1 misc vector export translates");
     let line = t.hlsl.lines().find(|l| l.contains("o.o1 =")).unwrap_or_else(|| panic!("no layer write:\n{}", t.hlsl));
     assert!(line.contains("uint4(") && line.trim_end().ends_with(".z);"), "{line}");
+}
+
+const EXP_POS0_V0_V3: [u32; 2] = [0xf800_08cf, 0x0300_0300];
+
+#[test]
+fn vertex_shader_receives_vertex_and_instance_index_in_v0_and_v3() {
+    let words = [EXP_POS0_V0_V3[0], EXP_POS0_V0_V3[1], S_ENDPGM];
+    let position = || vec![sig("SV_Position", 1, 3, 0, 0xf)];
+    let ex = shader(Stage::Vertex, &words, vec![sig("SV_VertexID", 6, 1, 0, 1), sig("SV_InstanceID", 8, 1, 1, 1)], position(), None);
+    let t = translate(&ex).expect("translate (vertex and instance index)");
+    assert!(t.hlsl.contains("    v0 = (uint)(i.i0);"), "{}", t.hlsl);
+    assert!(t.hlsl.contains("    v3 = (uint)(i.i1);"), "{}", t.hlsl);
+    let ex = shader(Stage::Vertex, &words, vec![sig("SV_VertexID", 6, 1, 0, 1)], position(), None);
+    let t = translate(&ex).expect("translate (vertex index only)");
+    assert!(t.hlsl.contains("    v0 = (uint)(i.i0);"), "{}", t.hlsl);
+    assert!(!t.hlsl.contains("v3 = (uint)(i."), "{}", t.hlsl);
+    let mut attribute = sig("ATTRIBUTE", 0, 3, 0, 0xf);
+    attribute.rw_mask = 0xf;
+    let exp_pos0_v4_v5_v6_v7 = [0xf800_08cf, 0x0706_0504, S_ENDPGM];
+    let ex = shader(Stage::Vertex, &exp_pos0_v4_v5_v6_v7, vec![attribute, sig("SV_VertexID", 6, 1, 1, 1), sig("SV_InstanceID", 8, 1, 2, 1)], position(), None);
+    let t = translate(&ex).expect("translate (index declared, not read)");
+    assert!(!t.hlsl.contains("v0 = (uint)(i.") && !t.hlsl.contains("v3 = (uint)(i."), "{}", t.hlsl);
+    assert!(t.hlsl.contains("    v4 = asuint(i.i0.x);"), "{}", t.hlsl);
 }
 
 #[test]
@@ -336,4 +398,107 @@ fn image_ops_with_status_or_r128_bits_are_refused() {
         let e = translate(&shader(Stage::Pixel, &program(0xf000_1108 | 1 << bit), vec![], out(), root())).err().unwrap_or_else(|| panic!("{name} translated"));
         assert!(e.contains(name), "{name}: {e}");
     }
+}
+
+#[test]
+fn durango_vertex_fetch_call_synthesizes_attributes_from_input_signature() {
+    let words = [0xbe80_2100, 0xf800_00cf, 0x0706_0504, S_ENDPGM];
+    let pos_in = sig("POSITION", 0, 3, 0, 0xf);
+    let color_in = sig("COLOR", 0, 3, 1, 0xf);
+    let pos_out = sig("SV_Position", 1, 3, 0, 0xf);
+    let mut ex = shader(Stage::Vertex, &words, vec![pos_in, color_in], vec![pos_out], None);
+
+    let mut durango_blob = vec![0u8; 72];
+    durango_blob[0..8].copy_from_slice(&72u64.to_le_bytes());
+    durango_blob[0x18..0x1c].copy_from_slice(&5u32.to_le_bytes());
+    durango_blob[0x28..0x30].copy_from_slice(&64u64.to_le_bytes());
+    ex.fssm = durango_blob;
+
+    let t = translate(&ex).expect("Durango vertex shader with s_swappc translates");
+    assert!(t.hlsl.contains("struct SIn {"), "Missing SIn:\n{}", t.hlsl);
+    assert!(t.hlsl.contains("float4 i0 : POSITION0;"), "Missing POSITION0:\n{}", t.hlsl);
+    assert!(t.hlsl.contains("float4 i1 : COLOR0;"), "Missing COLOR0:\n{}", t.hlsl);
+    assert!(t.hlsl.contains("v4 = asuint(i.i0.x);"), "Missing v4 init:\n{}", t.hlsl);
+    assert!(t.hlsl.contains("v7 = asuint(i.i0.w);"), "Missing v7 init:\n{}", t.hlsl);
+    assert!(t.hlsl.contains("v8 = asuint(i.i1.x);"), "Missing v8 init:\n{}", t.hlsl);
+    assert!(t.hlsl.contains("v11 = asuint(i.i1.w);"), "Missing v11 init:\n{}", t.hlsl);
+}
+
+#[test]
+fn amplification_dispatch_uses_the_y_and_z_group_counts() {
+    let mut ex = shader(Stage::Amplification, &[S_ENDPGM], vec![], vec![], None);
+    ex.gs_info = Some(GsInfo {
+        input_primitive: 0,
+        output_topology: 0,
+        max_vertex_count: 0,
+        mesh: Some(MeshInfo {
+            stage: 14,
+            groupshared_bytes: 0,
+            payload_bytes: 16,
+            max_vertices: 0,
+            max_primitives: 0,
+            prim_vectors: 0,
+            topology: 0,
+            num_threads: [32, 1, 1],
+        }),
+    });
+    let t = translate(&ex).expect("amplification shader translates");
+    assert!(
+        t.hlsl.contains("DispatchMesh(tb_args[0], max(tb_args[1], 1u), max(tb_args[2], 1u), tb_pl);"),
+        "{}",
+        t.hlsl
+    );
+}
+
+fn geometry(prim: u32, topo: u32) -> Result<tombox_xshader::hlsl::Translated, String> {
+    let mut ex = shader(
+        Stage::Geometry,
+        &[S_ENDPGM],
+        vec![sig("POSITION", 0, 3, 0, 0xf)],
+        vec![sig("SV_Position", 1, 3, 0, 0xf)],
+        None,
+    );
+    ex.gs_info = Some(GsInfo { input_primitive: prim, output_topology: topo, max_vertex_count: 1, mesh: None });
+    translate(&ex)
+}
+
+#[test]
+fn geometry_adjacency_primitives_translate() {
+    let tri = geometry(3, 5).expect("triangle");
+    assert!(tri.hlsl.contains("triangle SIn i[3]"), "{}", tri.hlsl);
+    assert!(tri.hlsl.contains("v0 = 0x04000000u; v1 = 0x800u;"), "{}", tri.hlsl);
+    assert!(!tri.hlsl.contains("v2 ="), "{}", tri.hlsl);
+
+    let line = geometry(6, 3).expect("lineadj");
+    assert_eq!(line.profile, "gs_5_0");
+    assert!(line.hlsl.contains("lineadj SIn i[4]"), "{}", line.hlsl);
+    assert!(line.hlsl.contains("v1 = 0xc000800u;"), "{}", line.hlsl);
+    assert!(!line.hlsl.contains("v2 ="), "{}", line.hlsl);
+
+    let adj = geometry(7, 5).expect("triangleadj");
+    assert!(adj.hlsl.contains("triangleadj SIn i[6]"), "{}", adj.hlsl);
+    assert!(adj.hlsl.contains("v2 = 0x14001000u;"), "{}", adj.hlsl);
+
+    let err = match geometry(4, 5) {
+        Err(e) => e,
+        Ok(_) => panic!("primitive 4 is not a GS input"),
+    };
+    assert!(err.contains("input primitive"), "{err}");
+}
+
+fn compute_threads(threads: Option<[u32; 3]>, preamble: [u32; 4]) -> String {
+    let mut ex = shader(Stage::Compute, &[S_ENDPGM], vec![], vec![], None);
+    ex.psv_numthreads = threads;
+    ex.isa_preamble = preamble;
+    translate(&ex).expect("compute shader translates").hlsl
+}
+
+#[test]
+fn compute_numthreads_come_from_psv_when_the_preamble_is_zero() {
+    let h = compute_threads(Some([4, 2, 1]), [0; 4]);
+    assert!(h.contains("[numthreads(4, 2, 1)]"), "{h}");
+    let preamble = compute_threads(Some([4, 2, 1]), [0, 8, 1, 1]);
+    assert!(preamble.contains("[numthreads(8, 1, 1)]"), "{preamble}");
+    let missing = compute_threads(None, [0; 4]);
+    assert!(missing.contains("[numthreads(1, 1, 1)]"), "{missing}");
 }

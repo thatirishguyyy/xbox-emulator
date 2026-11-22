@@ -13,6 +13,7 @@ param(
   [string]$Out = '',
   [int]$LockWaitMinutes = 45,
   [switch]$NoWaitUser,
+  [string]$Seed = 'default',
   [switch]$ListScenes
 )
 
@@ -58,16 +59,16 @@ $AllSpecs = @{
       (Scr 'inworld' 'terraria_world_hud.png' 830 1018 260 28))
     Scenes = [ordered]@{
       menu = @{ Pad = '0:connect'; Rx = ''; Screen = 'title'; Timeout = 60; After = 2 }
-      world = @{ Pad = '0:connect;#title+0.5:press a;#selplayer+0.5:press a;#selworld+0.5:press a'; Rx = ''; Screen = 'inworld'; Timeout = 90; After = 3 }
+      world = @{ Pad = '0:connect;#title+0.3:press a;#selplayer+0.3:press a;#selworld+0.3:press a'; Rx = ''; Screen = 'inworld'; Timeout = 90; After = 3 }
     }
     Milestones = @(@{ Name = 'save read'; Src = 'compat'; Rx = [regex]'XGameSave' })
     GameLog = ''
   }
   fortnite = [pscustomobject]@{
     RunTitle = 'Fortnite'; Proc = 'FortniteClient-XSX-Shipping'; Drive = 'K:'; Main = 'lobby'; Seed = ''
-    PadScreens = @()
+    PadScreens = @((Scr 'start' 'fortnite_press_start.png' 800 745 370 60), (Scr 'safezone' 'fortnite_safe_zone.png' 620 470 680 55))
     Scenes = [ordered]@{
-      lobby = @{ Pad = '0:connect'; Rx = 'to \[UI\.State\.Athena\.Frontend'; Screen = ''; Timeout = 240; After = 5 }
+      lobby = @{ Pad = '0:connect;/Setting user focus to widget Splash_Screen/+2:press a;?#safezone+1:press a;/to \[UI\.State\.Startup\.SubgameSelect/+4:press a'; Rx = 'to \[UI\.State\.Athena\.Frontend'; Screen = ''; Timeout = 240; After = 5 }
     }
     Milestones = @(
       @{ Name = 'login'; Src = 'ods'; Rx = [regex]'HandleLoginRequestComplete.*Result=2' },
@@ -81,7 +82,7 @@ $AllSpecs = @{
       (Scr 'welcome' 'minecraft_welcome.png' 675 340 260 32 200 1049))
     Scenes = [ordered]@{
       welcome = @{ Pad = '0:connect'; Rx = ''; Screen = 'welcome'; Timeout = 120; After = 1 }
-      menu = @{ Pad = '0:connect;#welcome+1:press a'; Rx = ''; Screen = ''; ArmAfter = 'press a'; Timeout = 150; After = 3 }
+      menu = @{ Pad = '0:connect;#welcome+1:press a'; Rx = ''; Screen = ''; ArmAfter = 'press a'; NotScreen = 'welcome'; Timeout = 150; After = 3 }
     }
     Milestones = @(
       @{ Name = 'graphics context'; Src = 'ods'; Rx = [regex]'graphics context was gained' },
@@ -103,6 +104,7 @@ if ($ListScenes) {
   return
 }
 $Spec = $AllSpecs[$Title]
+if ($Seed -ne 'default') { $Spec.Seed = $Seed }
 if (-not $Scene -or $Scene -eq 'main') { $Scene = $Spec.Main }
 if (-not $Spec.Scenes.Contains($Scene)) { throw "scene '$Scene' is not defined for $Title (scenes: $($Spec.Scenes.Keys -join ', '))" }
 $Sc = $Spec.Scenes[$Scene]
@@ -115,6 +117,8 @@ $SceneScreen = if ($Sc.Screen) { $Spec.PadScreens | Where-Object { $_.Name -eq $
 if ($Sc.Screen -and -not $SceneScreen) { throw "scene screen '$($Sc.Screen)' has no reference for $Title" }
 $MotionCmd = if ($Sc.Contains('Motion')) { [string]$Sc.Motion } else { '' }
 $ArmCmd = if ($Sc.Contains('ArmAfter')) { [string]$Sc.ArmAfter } else { '' }
+$NotScreen = if ($Sc.Contains('NotScreen')) { $Spec.PadScreens | Where-Object { $_.Name -eq $Sc.NotScreen } | Select-Object -First 1 } else { $null }
+if ($Sc.Contains('NotScreen') -and -not $NotScreen) { throw "scene NotScreen '$($Sc.NotScreen)' has no reference for $Title" }
 
 if (-not $Id) { $Id = "pid$PID" }
 $Stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -288,6 +292,7 @@ if ($SceneScreen) { $need += "screen #$($SceneScreen.Name)" }
 $need += 'drawn frame'
 if ($MotionCmd) { $need += "motion after pad '$MotionCmd'" }
 if ($ArmCmd) { $need[-1] = $need[-1] + " (checked only after pad '$ArmCmd')" }
+if ($NotScreen) { $need += "screen #$($NotScreen.Name) gone" }
 Say ("  scene '{0}' is reached when: {1}" -f $Scene, ($need -join ' + ')) 'DarkGray'
 $waitStart = Get-Date
 $said = @{}
@@ -470,7 +475,12 @@ try {
           Copy-Item -LiteralPath $pr.Png -Destination $mp -Force
           $motionPrev = $mp
         }
-        if ($screenOk -and $motionOk) {
+        $goneOk = $true
+        if ($NotScreen) {
+          $nv = Get-ScreenScore $NotScreen $pr.Png
+          if ($null -ne $nv -and $nv -ge $NotScreen.Min) { $goneOk = $false; $lastProbe = "#$($NotScreen.Name) still on screen" }
+        }
+        if ($screenOk -and $motionOk -and $goneOk) {
           $sceneAt = $el
           if ($null -ne $logOdsMs) { $sceneOdsMs = $logOdsMs }
           $ms['scene'] = [Math]::Round($el, 1)
@@ -484,8 +494,10 @@ try {
     $ps.Refresh()
     if ($ps.HasExited) { $verdict = 'exit'; break }
     if (-not (Get-Process -Name $Spec.Proc -ErrorAction SilentlyContinue | Where-Object { $tree.Contains($_.Id) }) -and $el -gt 30 -and $ms.Contains('game process')) { $tree = Get-Tree $ps.Id; if (-not (Get-Process -Name $Spec.Proc -ErrorAction SilentlyContinue | Where-Object { $tree.Contains($_.Id) })) { $verdict = 'exit'; break } }
-    if ($sceneAt -and $el -ge $sceneAt + $AfterScene -and ($padQueue.Count -eq 0 -or $MotionCmd)) { $null = Save-Frame $pids $el '_final'; $verdict = 'scene reached'; break }
-    if ($el -ge $Seconds) { $null = Save-Frame $pids $el '_final'; $verdict = 'timeout'; break }
+    $padLeft = @($padQueue | Where-Object { -not ($_.PSObject.Properties['Opt'] -and $_.Opt) }).Count
+    if ($sceneAt -and $el -ge $sceneAt + $AfterScene -and ($padLeft -eq 0 -or $MotionCmd)) { $null = Save-Frame $pids $el '_final'; $verdict = 'scene reached'; break }
+    $limit = if ($ms.Contains('game process')) { $ms['game process'] + $Seconds } else { $Seconds + 180 }
+    if ($el -ge $limit) { $null = Save-Frame $pids $el '_final'; $verdict = 'timeout'; break }
   }
   $elapsed = ((Get-Date) - $start).TotalSeconds
   $tree = Get-Tree $ps.Id

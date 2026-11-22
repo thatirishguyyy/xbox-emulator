@@ -678,6 +678,8 @@ extern "system" {
 pub unsafe extern "system" fn close_handle(h: usize) -> i32 {
     crate::logan::forget(h);
     crate::vab::forget(h);
+    crate::alpc::before_close(h);
+    crate::conkbd::before_close(h);
     before_close(h);
     CloseHandle(h)
 }

@@ -320,8 +320,16 @@ struct Listener {
 static LISTENERS: Mutex<Vec<Listener>> = Mutex::new(Vec::new());
 static SYSTEM_REFS: Mutex<u32> = Mutex::new(0);
 
+static REF_MIRROR: Mutex<Vec<(u16, u32)>> = Mutex::new(Vec::new());
+
+fn mirror_refs(ls: &[Listener]) {
+    let mut m = lock(&REF_MIRROR);
+    m.clear();
+    m.extend(ls.iter().map(|l| (l.service, l.refs)));
+}
+
 pub fn listener_refs(service: u16) -> u32 {
-    lock(&LISTENERS).iter().filter(|l| l.service == service).map(|l| l.refs).sum()
+    lock(&REF_MIRROR).iter().filter(|l| l.0 == service).map(|l| l.1).sum()
 }
 
 struct XbtpLink {
@@ -385,6 +393,7 @@ unsafe fn xbtp_listen_accept(x: &XbtpFns, link: &mut XbtpLink, service: u16, tim
         link.ready = ready;
         ls.push(Listener { service, handle: h as usize, ready, refs: 1 });
     }
+    mirror_refs(&ls);
     let w = [link.ready, link.cancel];
     let ms = if timeout == 0 { u32::MAX } else { timeout };
     match WaitForMultipleObjects(2, w.as_ptr(), 0, ms) {

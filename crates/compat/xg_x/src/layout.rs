@@ -548,15 +548,29 @@ pub fn compute(d: &Desc) -> Option<Layout> {
     compute_with(d, false)
 }
 
+pub fn depth_parent_format(dxgi: u32) -> u32 {
+    match dxgi {
+        22 => 20,
+        47 => 45,
+        120 => 118,
+        other => other,
+    }
+}
+
 pub fn is_depth_stencil_planar(dxgi: u32) -> bool {
-    ROWS.get(dxgi as usize).is_some_and(|r| r[4] == 1 && r[5] != 0 && r[6] != 0)
+    let fmt = depth_parent_format(dxgi);
+    ROWS.get(fmt as usize).is_some_and(|r| r[4] == 1 && r[5] != 0 && r[6] != 0)
 }
 
 pub fn compute_depth_msaa(d: &Desc) -> Option<Layout> {
     if d.samples <= 1 || d.dimension != 3 || d.mips != 1 || !is_depth_stencil_planar(d.dxgi) {
         return None;
     }
-    compute_with(d, true)
+    let mut base = *d;
+    base.dxgi = depth_parent_format(d.dxgi);
+    let mut l = compute_with(&base, true)?;
+    l.dxgi = d.dxgi;
+    Some(l)
 }
 
 fn compute_with(d: &Desc, msaa_planes: bool) -> Option<Layout> {

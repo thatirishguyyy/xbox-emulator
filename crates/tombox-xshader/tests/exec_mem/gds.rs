@@ -12,8 +12,15 @@ fn gds_op(op: u32, offset: u32, addr: u32, d0: u32, d1: u32, vdst: u32) -> [u32;
 }
 
 fn exec_gds(words: &[u32], gds_init: &[u32]) -> Result<(Vec<u32>, Vec<u32>), String> {
-    let ex = cs_extract(words, T);
-    let t = translate(&ex)?;
+    exec_gds_dispatch(words, gds_init, T, 1)
+}
+
+fn exec_gds_dispatch(words: &[u32], gds_init: &[u32], threads: u32, groups: u32) -> Result<(Vec<u32>, Vec<u32>), String> {
+    let ex = cs_extract(words, threads);
+    exec_gds_shader(translate(&ex)?, gds_init, groups)
+}
+
+fn exec_gds_shader(t: tombox_xshader::hlsl::Translated, gds_init: &[u32], groups: u32) -> Result<(Vec<u32>, Vec<u32>), String> {
     if !t.hlsl.contains(TB_GDS_HLSL_DECL) {
         return Err(format!("no GDS binding in\n{}", t.hlsl));
     }
@@ -21,10 +28,10 @@ fn exec_gds(words: &[u32], gds_init: &[u32]) -> Result<(Vec<u32>, Vec<u32>), Str
     let code = dxc::compile(&hlsl, &dxc::profile_for(t.profile)).map_err(|e| format!("dxc: {e}\n{hlsl}"))?;
     let m = CTX.get_or_init(|| Mutex::new(unsafe { ctx_new() }));
     let mut c = m.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe { run(&mut c, &hlsl, &code, gds_init) }.map_err(|e| format!("{e}\n{hlsl}"))
+    unsafe { run(&mut c, &hlsl, &code, gds_init, groups) }.map_err(|e| format!("{e}\n{hlsl}"))
 }
 
-unsafe fn run(c: &mut Ctx, hlsl: &str, code: &[u8], gds_init: &[u32]) -> Result<(Vec<u32>, Vec<u32>), String> {
+unsafe fn run(c: &mut Ctx, hlsl: &str, code: &[u8], gds_init: &[u32], groups: u32) -> Result<(Vec<u32>, Vec<u32>), String> {
     let g = &c.gpu;
     let blob = ser_ranges(&[vec![[1, 8, 0, 0, 0xffff_ffff]]])?;
     let mut rs: *mut c_void = core::ptr::null_mut();
@@ -76,7 +83,7 @@ unsafe fn run(c: &mut Ctx, hlsl: &str, code: &[u8], gds_init: &[u32]) -> Result<
     vcall!(l, 29, fn(*mut c_void) -> (), rs);
     vcall!(l, 31, fn(u32, u64) -> (), 0, vgpu);
     vcall!(l, 25, fn(*mut c_void) -> (), pso);
-    vcall!(l, 14, fn(u32, u32, u32) -> (), 1, 1, 1);
+    vcall!(l, 14, fn(u32, u32, u32) -> (), groups, 1, 1);
     c.gpu.barrier(ubuf, 8, d3d::COPY_SOURCE);
     c.gpu.barrier(gbuf, 8, d3d::COPY_SOURCE);
     vcall!(l, 15, fn(*mut c_void, u64, *mut c_void, u64, u64) -> (), rb, 0, ubuf, 0, CS_BYTES);
@@ -245,7 +252,7 @@ fn ds_gds_shared_counters() {
     for t in 0..T {
         assert_eq!(gds[slot(t) + 256], dv(t));
     }
-    for op in [0x19u32, 0x1d, 0x3f] {
+    for op in [0x1du32, 0x3f] {
         let words = prog(0, &gds_op(op, 0, 1, 2, 0, 10), &[10]);
         assert!(translate(&cs_extract(&words, T)).is_err(), "op {op:#x} must be refused");
     }
@@ -321,5 +328,109 @@ fn ds_gds_append_consume() {
         println!("ds_gds_append_consume: {} mnemonics verified on hardware: {ok:?}", ok.len());
     } else {
         println!("ds_gds_append_consume: WARP waves are narrower than an RDNA2 wave32, so only the counter totals were checked. Set TOMBOX_EXEC_HW=1 to check the per-wave return values on a wave32 device.");
+    }
+}
+
+#[test]
+fn ds_gws_counter_updates_once_per_guest_wave() {
+    use tombox_xshader::gds_abi::{TB_GWS_COUNTER_MASK, TB_GWS_TABLE_DWORD};
+
+    let offset = 7;
+    let base = 61;
+    let index = (TB_GWS_TABLE_DWORD + 4) as usize;
+    let initialize = gds_op(0x19, offset, 0, 20, 0, 0);
+    let increment = gds_op(0x1a, offset, 0, 0, 0, 0);
+
+    for (threads, threshold, expected) in [(32, 4, Some(7)), (32, 30, Some(33)), (32, 31, None), (64, 32, Some(35))] {
+        let mut body = vec![sop1(3, 40, 126), vop2(0x25, 20, LIT, 0), 0x1000];
+        body.extend_from_slice(&[vopc(0xd1, ic(threshold), 0)]);
+        body.extend_from_slice(&initialize);
+        body.extend_from_slice(&increment);
+        body.extend_from_slice(&increment);
+        body.push(sop1(3, 126, 40));
+        let words = prog(base << 16, &body, &[0]);
+        let g0 = init();
+        let (_, actual) = exec_gds_dispatch(&words, &g0, threads, 1).unwrap();
+        let mut want = g0;
+        if let Some(count) = expected {
+            want[index] = count & TB_GWS_COUNTER_MASK;
+        }
+        assert_eq!(actual[index], want[index], "threshold {threshold}");
+        assert_eq!(actual, want, "another GDS resource was modified");
+    }
+}
+
+#[test]
+fn ds_gws_concurrent_posts_preserve_all_increments() {
+    use tombox_xshader::gds_abi::TB_GWS_TABLE_DWORD;
+
+    let mut body = vec![vopc(0xd1, ic(30), 0)];
+    body.extend_from_slice(&gds_op(0x1a, 7, 0, 0, 0, 0));
+    let words = prog(61 << 16, &body, &[]);
+    let index = (TB_GWS_TABLE_DWORD + 4) as usize;
+    for (threads, expected) in [(32, 21), (64, 25)] {
+        let mut want = init();
+        want[index] = 17;
+        let (_, actual) = exec_gds_dispatch(&words, &want, threads, 4).unwrap();
+        want[index] = expected;
+        assert_eq!(actual, want);
+    }
+}
+
+#[test]
+fn ds_gws_bulk_post_uses_first_active_lane_in_each_group() {
+    use tombox_xshader::gds_abi::{TB_GWS_COUNTER_MASK, TB_GWS_TABLE_DWORD};
+
+    let mut body = vec![vop2(0x25, 20, LIT, 0), 0x1000, vopc(0xd1, ic(4), 0)];
+    body.extend_from_slice(&gds_op(0x1b, 7, 0, 20, 0, 0));
+    let words = prog(61 << 16, &body, &[]);
+    let index = (TB_GWS_TABLE_DWORD + 4) as usize;
+    for (threads, credits_per_group) in [(32, 5), (64, 5 + 32)] {
+        let mut want = init();
+        want[index] = TB_GWS_COUNTER_MASK - 1;
+        let (_, actual) = exec_gds_dispatch(&words, &want, threads, 4).unwrap();
+        want[index] += 4 * credits_per_group;
+        assert_eq!(actual, want);
+        assert_eq!(actual[index] & TB_GWS_COUNTER_MASK, 4 * credits_per_group - 2);
+    }
+}
+
+#[test]
+fn ds_gws_refuses_unsupported_group_and_wait() {
+    let init = gds_op(0x19, 7, 0, 20, 0, 0);
+    let words = prog(0, &init, &[0]);
+    let e = translate(&cs_extract(&words, 1025)).err().unwrap();
+    assert!(e.contains("wave32 compute group"), "{e}");
+
+    let wait = gds_op(0x1c, 7, 0, 0, 0, 0);
+    let words = prog(0, &wait, &[0]);
+    let e = translate(&cs_extract(&words, 32)).err().unwrap();
+    assert!(e.contains("global wave sync"), "{e}");
+}
+
+#[test]
+fn ds_gws_counter_boundaries_across_rows_and_partial_waves() {
+    use tombox_xshader::gds_abi::{TB_GWS_COUNTER_MASK, TB_GWS_TABLE_DWORD};
+    let idx = (TB_GWS_TABLE_DWORD + 7) as usize;
+    for (dims, waves) in [([1, 1, 1], 1), ([17, 3, 1], 2), ([16, 2, 3], 3), ([32, 32, 1], 32)] {
+        let post = prog(0, &gds_op(0x1a, 7, 0, 0, 0, 0), &[]);
+        let mut ex = cs_extract(&post, dims[0]);
+        ex.isa_preamble[1..].copy_from_slice(&dims);
+        let mut gds = init();
+        gds[idx] = 4096 - waves;
+        let (_, actual) = exec_gds_shader(translate(&ex).unwrap(), &gds, 1).unwrap();
+        assert_eq!(actual[idx] & TB_GWS_COUNTER_MASK, 0, "{dims:?}");
+        gds[idx] = actual[idx];
+        assert_eq!(actual, gds);
+    }
+
+    for value in [0u32, 4095, 4096, 4097, u32::MAX] {
+        let mut setup = vec![vop1(1, 20, LIT), value];
+        setup.extend_from_slice(&gds_op(0x19, 7, 0, 20, 0, 0));
+        setup.extend_from_slice(&gds_op(0x1b, 7, 0, 20, 0, 0));
+        let mut expected = init();
+        let (_, actual) = exec_gds_dispatch(&prog(0, &setup, &[]), &expected, 32, 1).unwrap();
+        expected[idx] = 2 * (value & 4095);
+        assert_eq!(actual, expected, "initialization and bulk post with {value:#x}");
     }
 }

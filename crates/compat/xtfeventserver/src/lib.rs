@@ -1,5 +1,16 @@
 #![allow(non_snake_case, clippy::missing_safety_doc)]
 
+pub mod sys;
+pub mod com;
+pub mod imports;
+pub mod shared;
+pub mod dispatcher;
+pub mod etw;
+pub mod server;
+
+#[cfg(test)]
+mod tests;
+
 use core::ffi::c_void;
 use std::sync::Once;
 use xtfcommon::msvc::{operator_delete, operator_new};
@@ -62,8 +73,13 @@ pub extern "C" fn GetEventSourceMap() -> *mut EventSourceMap {
     core::ptr::addr_of_mut!(MAP)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn XtfOrdinal_4(extension: *const sys::GUID, iid: *const sys::GUID, ppv: *mut *mut c_void) -> sys::HRESULT {
+    server::extension_entry_point(extension, iid, ppv)
+}
+
 #[cfg(test)]
-mod tests {
+mod map_tests {
     use super::*;
 
     #[test]

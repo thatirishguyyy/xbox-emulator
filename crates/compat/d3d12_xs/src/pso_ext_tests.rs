@@ -386,3 +386,28 @@ fn derived_patches_have_no_count_limit_like_0x5b180() {
     assert_eq!(u32at(&desc, 0x1c0), 0x1000 + 39);
     assert!(!apply_derived_patch(8, &[0u8; 0x148], &mut desc, &mut ext));
 }
+
+#[test]
+fn registered_pso_owns_semantic_names_and_drops_the_cached_blob() {
+    let mut name = b"POSITION\0".to_vec();
+    let mut layout = vec![0u8; 32];
+    layout[0..8].copy_from_slice(&(name.as_ptr() as u64).to_le_bytes());
+    let cached = vec![7u8; 64];
+    let mut desc = vec![0u8; crate::pso_serial::GFX_DESC_SIZE];
+    desc[0x228..0x230].copy_from_slice(&(layout.as_ptr() as u64).to_le_bytes());
+    desc[0x230..0x234].copy_from_slice(&1u32.to_le_bytes());
+    desc[0x278..0x280].copy_from_slice(&(cached.as_ptr() as u64).to_le_bytes());
+    desc[0x280..0x288].copy_from_slice(&64u64.to_le_bytes());
+    let key = 0x7e57_0001usize as *mut c_void;
+    unsafe { crate::device_wrap::register_gfx_pso(key, desc, Vec::new()) };
+    name.iter_mut().for_each(|b| *b = 0xdd);
+    layout.iter_mut().for_each(|b| *b = 0xee);
+    let (d, _keep) = crate::device_wrap::gfx_pso_desc(key as usize).expect("registered");
+    let lp = u64::from_le_bytes(d[0x228..0x230].try_into().unwrap()) as *const u8;
+    assert_ne!(lp, layout.as_ptr());
+    let np = unsafe { core::ptr::read_unaligned(lp as *const u64) } as *const u8;
+    assert_ne!(np, name.as_ptr());
+    let got = unsafe { core::ffi::CStr::from_ptr(np as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(got, b"POSITION");
+    assert!(d[0x278..0x288].iter().all(|&b| b == 0));
+}

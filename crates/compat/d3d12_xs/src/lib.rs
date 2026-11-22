@@ -12,6 +12,7 @@
 //! base interface — those will be addressed as the RHI exercises them.
 
 mod device_wrap;
+mod res3d;
 mod dxgi_device;
 mod xone_dxgi;
 mod xone_queue;

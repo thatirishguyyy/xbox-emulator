@@ -8,7 +8,7 @@ pub struct Export {
     pub note: String,
 }
 
-pub const STATUSES: [&str; 4] = ["implemented", "forwarded", "stub", "missing"];
+pub const STATUSES: [&str; 5] = ["implemented", "forwarded", "stub", "missing", "unsupported"];
 
 pub fn parse(text: &str) -> Vec<Export> {
     text.lines()

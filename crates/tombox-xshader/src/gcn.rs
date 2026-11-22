@@ -687,7 +687,11 @@ pub fn extract_durango(
     let d = parse(blob)?;
     let lowered = lower(&d.code, &d.data)?;
     let body = |cc: &[u8; 4]| container.chunk(cc).map(|c| &dxbc[c.offset..c.offset + c.size]);
-    let sig = |a: &[u8; 4], b: &[u8; 4]| body(a).or_else(|| body(b)).and_then(|x| crate::meta::parse_signature(x).ok()).unwrap_or_default();
+    let sig = |a: &[u8; 4], b: &[u8; 4]| {
+        body(a).and_then(|x| crate::meta::parse_signature(a, x).ok())
+            .or_else(|| body(b).and_then(|x| crate::meta::parse_signature(b, x).ok()))
+            .unwrap_or_default()
+    };
     Ok(crate::ShaderExtract {
         stage,
         shader_model,
@@ -697,6 +701,7 @@ pub fn extract_durango(
         isa: lowered.isa[..lowered.code_len].to_vec(),
         isa_offset_in_fssm: d.code_start,
         isa_preamble: thread_group(&d, stage),
+        psv_numthreads: if stage == crate::Stage::Compute { body(b"PSV0").and_then(crate::meta::parse_psv0_cs_threads) } else { None },
         isa_data: lowered.isa,
         has_input_sig: container.chunk(b"ISG1").is_some() || container.chunk(b"ISGN").is_some(),
         has_output_sig: container.chunk(b"OSG1").is_some() || container.chunk(b"OSGN").is_some(),

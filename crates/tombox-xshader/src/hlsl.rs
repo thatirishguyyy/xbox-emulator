@@ -433,6 +433,7 @@ struct Emitter<'a> {
     live: Vec<String>,
     /// Pixel shader needs its position within the 2x2 quad (ds_swizzle).
     uses_quad: bool,
+    vs_lds_out: bool,
     regs: BTreeSet<String>,
     body: String,
     tmp: usize,
@@ -449,6 +450,7 @@ struct Emitter<'a> {
     bl_loads: HashMap<usize, (u32, u8)>,
     bl_const: HashMap<u32, u32>,
     uses_f64: bool,
+    uses_d16: bool,
     uav_mips: BTreeSet<u32>,
     tex_mips: BTreeSet<u32>,
     sm6_minor: u32,
@@ -1078,6 +1080,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         dsel_moves: HashMap::new(),
         live: Vec::new(),
         uses_quad: false,
+        vs_lds_out: false,
         regs: BTreeSet::new(),
         body: String::new(),
         tmp: 0,
@@ -1098,6 +1101,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         bl_loads: HashMap::new(),
         bl_const: HashMap::new(),
         uses_f64: false,
+        uses_d16: false,
         uav_mips: BTreeSet::new(),
         tex_mips: BTreeSet::new(),
         sm6_minor: 0,
@@ -2069,7 +2073,7 @@ impl<'a> Emitter<'a> {
                         written.insert(d);
                     }
                 }
-                Enc::Sop1 if ins.mnemonic == "s_swappc_b64" && self.durango.is_some() => {}
+                Enc::Sop1 if ins.mnemonic == "s_swappc_b64" && (self.durango.is_some() || crate::gcn::is_durango(&self.ex.fssm)) => {}
                 Enc::Sop1 if ins.mnemonic == "s_getpc_b64" => {
                     if let Some(d) = ins.dst.first().and_then(sg) {
                         sym.insert(d, Sym::Code);
@@ -2425,8 +2429,6 @@ impl<'a> Emitter<'a> {
         self.touch(dst);
         let d = name(dst)?;
         match d.as_str() {
-            "exec_lo" => self.line(&format!("exec_lo = ({expr}) & 1u;")),
-            "exec_hi" => self.line("exec_hi = 0u;"),
             _ => self.line(&format!("{d} = {expr};")),
         }
         Ok(())
@@ -2589,7 +2591,7 @@ impl<'a> Emitter<'a> {
                 }
                 let exits: Vec<String> = labels.iter().filter(|&&t| t > i).map(|t| format!("j{t}")).collect();
                 let exit = if exits.is_empty() { String::new() } else { format!(" && !({})", exits.join(" || ")) };
-                self.line(&format!("}} while (tb_c{i}{exit} && ++tb_guard < 65536u);"));
+                self.line(&format!("}} while (tb_c{i}{exit} && ++tb_guard < {}u);", loop_guard(65536)));
                 self.loop_depth = self.loop_depth.saturating_sub(1);
             }
         }
@@ -2637,7 +2639,7 @@ impl<'a> Emitter<'a> {
         let starts: Vec<usize> = leaders.into_iter().filter(|&s| s < n).collect();
         self.loop_depth = 0;
         self.line("uint tb_pc = 0u; uint tb_guard = 0u;");
-        self.line(&format!("[loop] while (tb_pc != {n}u && tb_guard++ < 1000000u) {{"));
+        self.line(&format!("[loop] while (tb_pc != {n}u && tb_guard++ < {}u) {{", loop_guard(1000000)));
         self.loop_depth += 1;
         // Flat `if (tb_sel == K)` tests on a snapshot of the block id (FXC mishandles a
         // `switch` whose selector is assigned inside its cases).
@@ -3252,6 +3254,9 @@ impl<'a> Emitter<'a> {
                         let t = self.tmp;
                         self.tmp += 1;
                         self.line(&format!("uint t{t} = {a}; t{t} |= (t{t} >> 1) & 0x77777777u; t{t} |= (t{t} >> 2) & 0x33333333u; t{t} &= 0x11111111u; t{t} *= 0xfu;"));
+                        if name(&d)? == "exec_lo" {
+                            self.line(&format!("t{t} &= 1u;"));
+                        }
                         self.ws(&d, &format!("t{t}"))?;
                         self.line(&format!("scc = (t{t} != 0u) ? 1u : 0u;"));
                         Ok(())
@@ -3263,6 +3268,9 @@ impl<'a> Emitter<'a> {
                         self.tmp += 1;
                         for (k, x) in [("l", &a), ("h", &ah)] {
                             self.line(&format!("uint t{t}{k} = {x}; t{t}{k} |= (t{t}{k} >> 1) & 0x77777777u; t{t}{k} |= (t{t}{k} >> 2) & 0x33333333u; t{t}{k} &= 0x11111111u; t{t}{k} *= 0xfu;"));
+                        }
+                        if name(&d)? == "exec_lo" {
+                            self.line(&format!("t{t}l &= 1u; t{t}h = 0u;"));
                         }
                         self.ws(&d, &format!("t{t}l"))?;
                         let dh = hi(&d);
@@ -3702,6 +3710,7 @@ impl<'a> Emitter<'a> {
                 // registers back to back, 4 dwords each (observed in a55400ccab602283: dwords
                 // 0..3 = TEXCOORD6.xyzw, 4..6 = TEXCOORD8.xyz, matching the output signature).
                 // The address register is this vertex's record base and is not needed.
+                self.vs_lds_out = true;
                 let off = ins.aux.imm as u32;
                 let vg = |o: &Opnd, k: u8| match o {
                     Opnd::Vgpr(n) => Ok(Opnd::Vgpr(n + k)),
@@ -5390,6 +5399,8 @@ impl<'a> Emitter<'a> {
             1 => ("point", 1usize),
             2 => ("line", 2),
             3 => ("triangle", 3),
+            6 => ("lineadj", 4),
+            7 => ("triangleadj", 6),
             other => return Err(format!("GS input primitive {other} unsupported")),
         };
         let stream = match gi.output_topology {
@@ -6247,6 +6258,9 @@ impl<'a> Emitter<'a> {
         if self.uses_f64 {
             h.push_str(F64_HELPERS);
         }
+        if self.uses_d16 {
+            h.push_str(mtbuf::D16_HELPERS);
+        }
         if self.uses_global {
             h.push_str(&global::helpers());
         }
@@ -6382,6 +6396,10 @@ impl<'a> Emitter<'a> {
         if let Some(x) = self.xlane_header()? {
             let _ = writeln!(h, "{x}");
         }
+        if self.body.contains("tb_gws_counter_first") {
+            let [_, x, y, z] = ex.isa_preamble;
+            let _ = writeln!(h, "groupshared uint tb_gws_counter_first[{}];", (x * y * z).div_ceil(32));
+        }
         if let Some(x) = gds::gds_header(&self.body) {
             let _ = writeln!(h, "{x}");
         }
@@ -6402,7 +6420,11 @@ impl<'a> Emitter<'a> {
             // thread-group id in the three SGPRs following the user-data (root-parameter)
             // registers, thread-group size in the ISA preamble dwords 1..3.
             let p = ex.isa_preamble;
-            let (tx, ty_, tz) = (p[1].max(1), p[2].max(1), p[3].max(1));
+            let (tx, ty_, tz) = if p[1] != 0 || p[2] != 0 || p[3] != 0 {
+                (p[1].max(1), p[2].max(1), p[3].max(1))
+            } else {
+                ex.psv_numthreads.map(|t| (t[0], t[1], t[2])).unwrap_or((1, 1, 1))
+            };
             let nparams = ex.root_sig.as_ref().map(|r| r.params.len()).unwrap_or(4);
             let g = self.cs_tgid_base(nparams);
             let _ = writeln!(h, "[numthreads({tx}, {ty_}, {tz})]
@@ -6510,12 +6532,23 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
             for rname in ["s3", "v0", "v1"] {
                 self.regs.insert(rname.to_string());
             }
-            let _ = writeln!(init, "    s3 = 0x100u; v0 = 0x04000000u; v1 = 0x800u;");
+            let _ = if nv <= 3 {
+                writeln!(init, "    s3 = 0x100u; v0 = 0x04000000u; v1 = 0x800u;")
+            } else {
+                let pack = |a: u32, b: u32| (a * 0x400) | ((b * 0x400) << 16);
+                if nv > 4 {
+                    self.regs.insert("v2".to_string());
+                    writeln!(init, "    s3 = 0x100u; v0 = {:#x}u; v1 = {:#x}u; v2 = {:#x}u;", pack(0, 1), pack(2, 3), pack(4, 5))
+                } else {
+                    writeln!(init, "    s3 = 0x100u; v0 = {:#x}u; v1 = {:#x}u;", pack(0, 1), pack(2, 3))
+                }
+            };
         }
         if !is_ps && !self.is_gs {
+            let is_durango = self.durango.is_some() || crate::gcn::is_durango(&self.ex.fssm);
             let mut group = 0usize;
             for reg in distinct_regs(ex.input_sig.iter().filter(|e| e.sysval == 0)) {
-                let read = ex.input_sig.iter().any(|e| e.sysval == 0 && e.register == reg && e.rw_mask != 0);
+                let read = ex.input_sig.iter().any(|e| e.sysval == 0 && e.register == reg && (e.rw_mask != 0 || (is_durango && e.mask != 0)));
                 if ex.stage == Stage::Vertex && !read {
                     continue;
                 }
@@ -6533,6 +6566,20 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
                         None => (if c == 3 { "0x3f800000u" } else { "0u" }).to_string(),
                     };
                     let _ = writeln!(init, "    {v} = {val};");
+                }
+            }
+            if ex.stage == Stage::Vertex && !self.vs_lds_out && self.durango.is_none() {
+                for (ei, e) in ex.input_sig.iter().enumerate() {
+                    let v = match e.sysval {
+                        6 => "v0",
+                        8 => "v3",
+                        _ => continue,
+                    };
+                    if !self.live.iter().any(|l| l == v) {
+                        continue;
+                    }
+                    self.regs.insert(v.to_string());
+                    let _ = writeln!(init, "    {v} = (uint)(i.i{ei});");
                 }
             }
         }
@@ -6560,7 +6607,20 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
         let (init, body) = centroid::lower(ex, &pos_field, &init, &self.body);
         h.push_str(&init);
         h.push_str(&body);
+        if guard_mark() && !no_out && !self.is_gs && body.contains("uint tb_guard = 0u;") && h.contains("float4 o0 : SV_Target0;") {
+            let _ = writeln!(h, "    if (tb_guard >= {}u) o.o0 = float4(1000.0, 0.0, 1000.0, 1.0);", loop_guard(1000000).saturating_sub(1));
+        }
         h.push_str(if no_out || self.is_gs { "}\n" } else { "    return o;\n}\n" });
         Ok(h)
     }
+}
+
+pub fn loop_guard(default: u32) -> u32 {
+    static G: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    G.get_or_init(|| std::env::var("TOMBOX_XS_LOOP_GUARD").ok().and_then(|v| v.trim().parse().ok()).filter(|&n: &u32| n > 0)).map_or(default, |n| n.min(default))
+}
+
+pub fn guard_mark() -> bool {
+    static M: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *M.get_or_init(|| std::env::var("TOMBOX_XS_GUARD_MARK").map(|v| v == "1").unwrap_or(false))
 }

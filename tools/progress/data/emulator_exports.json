@@ -489,6 +489,16 @@
   },
   "not_in_built_dll": []
  },
+ "ConIoSrv.dll": {
+  "file": "crates/compat/coniosrv/src/lib.rs",
+  "table": "crates/compat/coniosrv/exports.txt",
+  "functions": {
+   "ServerDllInitialization": "implemented"
+  },
+  "notes": {
+   "ServerDllInitialization": "runs the console ConIoSrv.dll (19041/22000 0x11c0, 22621 0x13e0) through console-image with all 74 imports routed to console-sandbox, refuses with 0xC00000BB if any import is unrouted. Console chain: KBDUS LoadLibraryExW + KbdLayerDescriptor (kbdlayout.rs loads the console KBDUS.DLL), mode read 0x15d8/0x15c4/0x17cc (HKLM\\SYSTEM\\CurrentControlSet\\Control\\ConKbd Headless/UseBGFX in the sandbox registry, RtlGetDeviceFamilyInfoEnum = platform 5 in family.rs), RtlCreateUserThread keyboard thread 0x1e50/0x1e50/0x23c0 (CM_Get_Device_Interface_List/CM_Register_Notification in cfgmgr.rs, keyboard open/NtReadFile APC 0x2460/0x2460/0x2530 in conkbd.rs), display open 0x1764/0x1754/0x195c (\\Device\\ConDrv\\Display absent in condrv.rs, so the console falls back to mode 0), ALPC port 0x26cc/0x26cc/0x28c8 \\ConsoleInputServerPort and CreateThread server loop 0x30e0/0x30e0/0x2a90 with accept 0x2884/0x2884/0x2f80, request 0x2d88 (19041), disconnect 0x2f90/0x2f88/0x2df0; RVAs are 19041/22000/22621 (alpc.rs in-process ALPC model: ports, connect/accept, PortContext, section and views, indirect handle attributes, request/reply by MessageId, LPC_PORT_CLOSED). Tests tests/console_19041.rs, console_22000.rs, console_22621.rs: CSR_SERVER_DLL fields cleared, a conhost-shaped client (conhost 0x828b8/0x83158 attrs 0x2080000, msg 0x400018) connects, gets 2 handles and a 0x10000 view, mode 0, MapVirtualKey both ways, VkKeyScan, GetKeyState down/up from the console layout, unknown code unhandled, display requests 3/4/6 handled with STATUS_UNSUCCESSFUL (no display), emulated keyboard arrival -> console opens it and posts a read, scan 0x1e make/break arrives as the 0x18-byte KEY_EVENT record on the event pipe, removal closes and unregisters, client close -> console disconnects and frees its section."
+  }
+ },
  "d3d12_x.dll": {
   "file": "crates/compat/d3d12_x/src/lib.rs",
   "table": "crates/compat/d3d12_x/exports.txt",
@@ -2716,8 +2726,8 @@
    "PixDllInitializeToolMemory": "implemented"
   },
   "notes": {
-   "PixDllInitialize": "console builds the D3D12 GPU capture runtime (0x95ba8-byte capture object, capture-control thread, ETW sessions, Xbtp link to the PIX tool) with no guard; there is no console-exact partial behaviour to reproduce without that runtime",
-   "PixDllInitializeFromTitle": "console 0x234a0 builds the 0x95b30 capture singleton and the PIX::InteractiveRuntime (D:\\PIX, device/capture/notification threads, Xbtp listen on service 0x1080) and memcpys a 15-slot table, S_OK; 329 functions, and the device-engine loop needs an in-process xbtplink device or it spins (docs/BLOCKERS.md); only loaded when \\\\.\\XgsKmd10 exists",
+   "PixDllInitialize": "not started: 0x228a0 GetVersion, flags bit 0 gate 0x227c0 (FindFirstFileA c:\\pix\\ via 0x226e8, E_NOTIMPL), refcount 0xa2e10, driver init 0x2376c on the caller's 0xf8 xgs12_10 table (sets tool-state +0xa), 0x150-byte table 0x216f0.. with capture slots 0x21da0.. switched on singleton +0x95b28; the singleton/runtime it shares with row 2 is in ../pixrt/src/runtime.rs (docs/BLOCKERS.md)",
+   "PixDllInitializeFromTitle": "init path ported but not exported (../pixrt/src/runtime.rs from_title, 22000 0x234a0 / 22621 0x283e0): singleton 0x95b30/0x95ba8, InteractiveRuntime 0x18234/0x1c254 with D:\\PIX\\ in the console_sandbox D: drive, 3 named threads with the 0x2443c affinity rule, Xbtp listen on service 0x1080 (config 0x51c88, shared listener 0xa2650) parked on the in-process xbtplink, 0x78-byte table; slots 1-6, 9-14 and slot 0 except type 1 ported; still missing: slot 0 type 1 timing capture (0x32601, backend 0x5f1d0 slot 3 0x27500, ETW .pevt), slot 7 0x2cf30 thread event buffers, slot 8 0x22f70, post-accept protocol 0x3a790/0x1b4e7, 19041 two-thread runtime (docs/BLOCKERS.md)",
    "PixDllInitializeToolMemory": "no guard, as on the console: flag bit 0 hands out a null table, otherwise the two-entry tooling-memory allocator table; the allocator's lazy state follows pixrt10 (overflow assumed allowed when \\.\\xvcmgmt cannot be opened, hypervisor CPUID 0x4000000D check on 22000+ builds, d:\\dbgbreakonnotoolingmemory break, PIX debug lines); copies into the caller's buffer and returns S_OK"
   },
   "not_in_built_dll": []

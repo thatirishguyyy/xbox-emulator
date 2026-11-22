@@ -371,14 +371,6 @@ fn depth_bind_planar_msaa_planes_match_console() {
                         d[0x1c..0x1e].copy_from_slice(&arr.to_le_bytes());
                         let (mut t, mut u): (*mut c_void, *mut c_void) = (core::ptr::null_mut(), core::ptr::null_mut());
                         let (ht, hu) = (theirs(d.as_ptr(), &mut t), XGCreateTextureComputer(d.as_ptr(), &mut u));
-                        if matches!(fmt, 22 | 47 | 120) {
-                            assert!(hu < 0 && u.is_null(), "{name} ours={hu:#x}: the stencil-only views have no depth plane row to lay out");
-                            if ht >= 0 {
-                                release(t);
-                            }
-                            rejected += 1;
-                            continue;
-                        }
                         assert_eq!(ht < 0, hu < 0, "{name} console={ht:#x} ours={hu:#x}");
                         if ht < 0 {
                             rejected += 1;
@@ -441,4 +433,45 @@ fn compute_depth_msaa_only_lays_out_single_mip_planar_depth() {
         assert_eq!(layout::compute_depth_msaa(&bad), None, "{bad:?}");
     }
     assert_eq!(compute(&d(19, 2, 1)), None);
+}
+
+#[test]
+fn compute_depth_msaa_stencil_views_match_parent_layouts() {
+    let cases = [(22u32, 20u32), (47, 45), (120, 118)];
+    for &(stencil_fmt, parent_fmt) in &cases {
+        assert!(layout::is_depth_stencil_planar(stencil_fmt));
+        for samples in [2u32, 4, 8] {
+            let desc_stencil = layout::Desc {
+                dimension: 3,
+                width: 1920,
+                height: 1080,
+                depth_or_array: 1,
+                mips: 1,
+                dxgi: stencil_fmt,
+                samples,
+                mode: 1,
+                pitch: 0,
+            };
+            let desc_parent = layout::Desc {
+                dxgi: parent_fmt,
+                ..desc_stencil
+            };
+            let lay_stencil = layout::compute_depth_msaa(&desc_stencil).expect("stencil view layout");
+            let lay_parent = layout::compute_depth_msaa(&desc_parent).expect("parent layout");
+
+            assert_eq!(lay_stencil.dxgi, stencil_fmt);
+            assert_eq!(lay_stencil.size, lay_parent.size);
+            assert_eq!(lay_stencil.align, lay_parent.align);
+            assert_eq!(lay_stencil.planes.len(), lay_parent.planes.len());
+            for (p_st, p_pa) in lay_stencil.planes.iter().zip(&lay_parent.planes) {
+                assert_eq!(p_st.is_some(), p_pa.is_some());
+                if let (Some(s), Some(p)) = (p_st, p_pa) {
+                    assert_eq!(s.size, p.size);
+                    assert_eq!(s.offset, p.offset);
+                    assert_eq!(s.align, p.align);
+                    assert_eq!(s.bpe, p.bpe);
+                }
+            }
+        }
+    }
 }

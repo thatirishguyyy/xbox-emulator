@@ -347,6 +347,14 @@ pub(crate) fn channel_in(d: &mut Dcc, t: &mut Tmp) -> Result<(), i32> {
     Ok(())
 }
 
+pub(crate) fn conv_known() -> u32 {
+    #[cfg(test)]
+    if let Some(m) = std::env::var("TOMBOX_DCC_CONV_KNOWN").ok().and_then(|x| u32::from_str_radix(&x, 16).ok()) {
+        return m;
+    }
+    if crate::dcc::xg_build() == 19041 { 0xff } else { 0b1101_1111 }
+}
+
 pub(crate) fn conv_seen(p: Option<usize>) -> [u8; 64] {
     let mut b = [0u8; 64];
     if crate::dcc::xg_build() == 19041 {

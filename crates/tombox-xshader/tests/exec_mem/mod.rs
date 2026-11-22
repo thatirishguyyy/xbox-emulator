@@ -10,6 +10,7 @@ mod flat;
 mod global;
 mod mimg;
 mod mtbuf;
+mod mtbuf_hw;
 mod rootmem;
 
 pub const R32G32B32A32_FLOAT: u32 = 2;

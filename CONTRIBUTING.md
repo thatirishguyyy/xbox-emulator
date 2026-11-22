@@ -62,6 +62,8 @@ cargo build -p <crate>
 cargo test -p <crate>
 ```
 
+The GNU target (`x86_64-pc-windows-gnu`) is not supported: its software `fmaf` is not correctly rounded, so the FMA reference values in the tombox-xshader tests come out one ULP off (see #126).
+
 Some crates also need third-party SDKs (the DirectX Agility SDK, DXC, libopus). Their `build.rs` says which.
 
 ## Licence

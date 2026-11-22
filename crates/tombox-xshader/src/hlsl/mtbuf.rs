@@ -125,27 +125,102 @@ fn pack(v: &str, bits: u32, num: Num) -> Result<String, String> {
     })
 }
 
-fn unpack_d16(v: &str, bits: u32, num: Num) -> Result<String, String> {
-    Ok(match (num, bits) {
-        (Num::Float, 16) => v.to_string(),
-        (Num::Float, 11) => format!("(({v}) << 4u)"),
-        (Num::Float, 10) => format!("(({v}) << 5u)"),
-        (Num::Uint, b) if b <= 16 => v.to_string(),
-        (Num::Sint, b) if b <= 16 => format!("(asuint({}) & 0xffffu)", sext(v, b)),
-        (Num::Uscaled, b) if b <= 11 => format!("(f32tof16((float)({v})) & 0xffffu)"),
-        (Num::Sscaled, b) if b <= 11 => format!("(f32tof16((float){}) & 0xffffu)", sext(v, b)),
-        (Num::Unorm | Num::Snorm, _) => return Err(format!("{bits}-bit {num:?} -> f16 rounding is not specified by the RDNA2 ISA")),
-        _ => return Err(format!("a {bits}-bit {num:?} component does not fit 16 bits and the RDNA2 ISA does not specify the conversion")),
-    })
+pub(super) const D16_HELPERS: &str = r#"uint tb_q16(bool neg, uint num, uint den) {
+    if (num == 0u) return 0u;
+    int e = (int)firstbithigh(num) - (int)firstbithigh(den);
+    uint64_t n64 = (uint64_t)num, d64 = (uint64_t)den;
+    if (e >= 0 ? (n64 < (d64 << (uint)e)) : ((n64 << (uint)(-e)) < d64)) e -= 1;
+    e = max(e, -14);
+    int sh = 10 - e;
+    uint64_t n = sh >= 0 ? (n64 << (uint)sh) : n64;
+    uint64_t d = sh >= 0 ? d64 : (d64 << (uint)(-sh));
+    uint64_t q = n / d; uint64_t r = n - q * d;
+    if (2u * r > d || (2u * r == d && (q & 1u) != 0u)) q += 1u;
+    if (q >= 2048u) { q >>= 1u; e += 1; }
+    uint h = e > 15 ? 0x7bffu : (q < 1024u ? (uint)q : ((((uint)(e + 15)) << 10) | ((uint)q - 1024u)));
+    return h | (neg ? 0x8000u : 0u);
+}
+uint tb_f16_rtz(uint u) {
+    uint s = (u >> 16) & 0x8000u, e = (u >> 23) & 0xffu, m = u & 0x7fffffu;
+    if (e == 255u) return s | 0x7c00u | (m != 0u ? max(m >> 13, 1u) : 0u);
+    if (e >= 143u) return s | 0x7bffu;
+    if (e >= 113u) return s | ((e - 112u) << 10) | (m >> 13);
+    uint sh = 126u - e;
+    return s | ((e != 0u && sh < 32u) ? ((m | 0x800000u) >> sh) : 0u);
+}
+uint tb_h2f(uint h) {
+    uint s = (h & 0x8000u) << 16, e = (h >> 10) & 31u, m = h & 0x3ffu;
+    if (e == 31u) return s | 0x7f800000u | (m << 13);
+    if (e == 0u) return s | asuint((float)m * 5.9604644775390625e-8f);
+    return s | ((e + 112u) << 23) | (m << 13);
+}
+uint tb_d16_un(uint h, uint mx) {
+    uint e = (h >> 10) & 31u, m = h & 0x3ffu;
+    if ((h & 0x8000u) != 0u || (e == 31u && m != 0u) || (e == 0u && m == 0u)) return 0u;
+    if (e >= 15u) return mx;
+    uint M = e == 0u ? m : (m | 0x400u), sh = e == 0u ? 24u : 25u - e;
+    uint p = M * mx, q = p >> sh, r = p & ((1u << sh) - 1u), hf = 1u << (sh - 1u);
+    if (r > hf || (r == hf && (q & 1u) != 0u)) q += 1u;
+    return q;
+}
+uint tb_d16_sn(uint h, uint mh, uint mask) {
+    uint e = (h >> 10) & 31u, m = h & 0x3ffu;
+    if (e == 31u && m != 0u) return 0u;
+    uint q;
+    if (e >= 15u) {
+        q = mh;
+    } else {
+        uint M = e == 0u ? m : (m | 0x400u), sh = e == 0u ? 24u : 25u - e;
+        uint p = M * mh;
+        q = p >> sh;
+        if ((p & ((1u << sh) - 1u)) >= (1u << (sh - 1u))) q += 1u;
+    }
+    return asuint((h & 0x8000u) != 0u ? -(int)q : (int)q) & mask;
+}
+"#;
+
+fn unpack16(v: &str, bits: u32, num: Num) -> String {
+    let mx = mask(bits);
+    match num {
+        Num::Unorm => format!("tb_q16(false, {v}, {mx:#x}u)"),
+        Num::Snorm => {
+            let mh = mask(bits - 1);
+            format!("tb_q16({s} < 0, min((uint)abs({s}), {mh:#x}u), {mh:#x}u)", s = sext(v, bits))
+        }
+        Num::Uscaled => format!("tb_q16(false, {v}, 1u)"),
+        Num::Sscaled => format!("tb_q16({s} < 0, (uint)abs({s}), 1u)", s = sext(v, bits)),
+        Num::Uint => format!("min({v}, 0xffffu)"),
+        Num::Sint => format!("(asuint(clamp({}, -32768, 32767)) & 0xffffu)", sext(v, bits)),
+        Num::Float => match bits {
+            32 => format!("tb_f16_rtz({v})"),
+            16 => v.to_string(),
+            _ => {
+                let mb = bits - 5;
+                format!("(((({v}) >> {mb}u) << 10) | ((({v}) & {:#x}u) << {}u))", mask(mb), 10 - mb)
+            }
+        },
+    }
 }
 
-fn pack_d16(h: &str, bits: u32, num: Num) -> Result<String, String> {
-    match num {
-        Num::Float if bits == 16 => Ok(h.to_string()),
-        Num::Unorm | Num::Snorm | Num::Float => pack(&format!("asuint(f16tof32({h}))"), bits, num),
-        Num::Sint => pack(&format!("asuint({})", sext(h, 16)), bits, num),
-        _ => pack(h, bits, num),
-    }
+fn pack16(h: &str, bits: u32, num: Num) -> Result<String, String> {
+    let mx = mask(bits);
+    Ok(match num {
+        Num::Unorm => format!("tb_d16_un({h}, {mx:#x}u)"),
+        Num::Snorm => format!("tb_d16_sn({h}, {:#x}u, {mx:#x}u)", mask(bits - 1)),
+        Num::Uint if bits == 32 => h.to_string(),
+        Num::Uint => format!("min({h}, {mx:#x}u)"),
+        Num::Sint => {
+            let s = format!("(asint(({h}) << 16u) >> 16u)");
+            if bits == 32 {
+                format!("asuint({s})")
+            } else {
+                format!("(asuint(clamp({s}, {}, {})) & {mx:#x}u)", -(1i64 << (bits - 1)), (1i64 << (bits - 1)) - 1)
+            }
+        }
+        Num::Float if bits == 32 => format!("tb_h2f({h})"),
+        Num::Float if bits == 16 => h.to_string(),
+        other => return Err(format!("tbuffer d16 store to a {bits}-bit {other:?} component is not lowered")),
+    })
 }
 
 impl<'a> Emitter<'a> {
@@ -228,11 +303,10 @@ impl<'a> Emitter<'a> {
                     self.line(&format!("uint t{t}_{k} = ({lo} >> t{t}s) | (({hi} << (31u - t{t}s)) << 1u);"));
                 }
             }
-            let one = match (matches!(fmt.num, Num::Uint | Num::Sint), d16) {
-                (true, _) => "1u",
-                (false, false) => "0x3f800000u",
-                (false, true) => "0x3c00u",
-            };
+            if d16 {
+                return self.emit_mtbuf_d16_load(&fmt, n, t, vd);
+            }
+            let one = if matches!(fmt.num, Num::Uint | Num::Sint) { "1u" } else { "0x3f800000u" };
             for k in 0..n {
                 let e = if k < nc {
                     let (off, bits) = fmt.fields[k as usize];
@@ -241,29 +315,17 @@ impl<'a> Emitter<'a> {
                     } else {
                         format!("((t{t}_{} >> {}u) & {:#x}u)", off / 32, off % 32, mask(bits))
                     };
-                    let c = format!("t{t}c{k}");
-                    let v = if d16 { unpack_d16(&c, bits, fmt.num).map_err(|e| format!("{}: {e}", ins.mnemonic))? } else { unpack(&c, bits, fmt.num) };
-                    self.line(&format!("uint {c} = {raw};"));
-                    v
+                    self.line(&format!("uint t{t}c{k} = {raw};"));
+                    self.line(&format!("uint t{t}v{k} = {};", unpack(&format!("t{t}c{k}"), bits, fmt.num)));
+                    format!("t{t}v{k}")
                 } else if k == 3 {
                     one.to_string()
                 } else {
                     "0u".to_string()
                 };
-                self.line(&format!("uint t{t}v{k} = {e};"));
-            }
-            if d16 {
-                for j in 0..n.div_ceil(2) {
-                    let o = Opnd::Vgpr(vd + j as u8);
-                    let e = if 2 * j + 1 < n {
-                        format!("(t{t}v{} | (t{t}v{} << 16u))", 2 * j, 2 * j + 1)
-                    } else {
-                        self.touch(&o);
-                        format!("(({} & 0xffff0000u) | t{t}v{})", r(&o)?, 2 * j)
-                    };
-                    self.wv(&o, &e)?;
+                if k >= nc {
+                    self.line(&format!("uint t{t}v{k} = {e};"));
                 }
-                return Ok(());
             }
             for k in 0..n {
                 self.wv(&Opnd::Vgpr(vd + k as u8), &format!("t{t}v{k}"))?;
@@ -273,13 +335,16 @@ impl<'a> Emitter<'a> {
         let w = n.min(nc);
         let len = fmt.bytes;
         let mut words = vec![String::new(); ndw as usize];
+        if d16 {
+            self.uses_d16 = true;
+        }
         for k in 0..w {
             let (off, bits) = fmt.fields[k as usize];
             let p = if d16 {
                 let o = Opnd::Vgpr(vd + (k / 2) as u8);
                 self.touch(&o);
-                let h = if k % 2 == 0 { format!("({} & 0xffffu)", r(&o)?) } else { format!("({} >> 16u)", r(&o)?) };
-                pack_d16(&h, bits, fmt.num)?
+                let h = if k % 2 == 0 { format!("({} & 0xffffu)", r(&o)?) } else { format!("({} >> 16)", r(&o)?) };
+                pack16(&h, bits, fmt.num)?
             } else {
                 let o = Opnd::Vgpr(vd + k as u8);
                 self.touch(&o);
@@ -305,6 +370,37 @@ impl<'a> Emitter<'a> {
             "[allow_uav_condition] for (uint t{t}j = t{t}j0; t{t}j < {len}u; t{t}j++) {{ uint t{t}y = t{t}b + t{t}j; uint t{t}x = t{t}y >> 2; uint t{t}q = (t{t}y & 3u) * 8u; uint t{t}d = (t{t}p[t{t}j >> 2] >> ((t{t}j & 3u) * 8u)) & 0xffu; uint t{t}o = {ew}; [allow_uav_condition] for (uint t{t}i = 0u; t{t}i < 4096u; t{t}i++) {{ uint t{t}r; InterlockedCompareExchange({ew}, t{t}o, (t{t}o & ~(0xffu << t{t}q)) | (t{t}d << t{t}q), t{t}r); if (t{t}r == t{t}o) break; t{t}o = t{t}r; }} }}"
         );
         self.line(&format!("if (exec_lo & 1u) {{ {body}}}"));
+        Ok(())
+    }
+
+    fn emit_mtbuf_d16_load(&mut self, fmt: &Ufmt, n: u32, t: usize, vd: u8) -> Result<(), String> {
+        self.uses_d16 = true;
+        let nc = fmt.fields.len() as u32;
+        let one = if matches!(fmt.num, Num::Uint | Num::Sint) { "1u" } else { "0x3c00u" };
+        for k in 0..n {
+            let e = if k < nc {
+                let (off, bits) = fmt.fields[k as usize];
+                let raw = if bits == 32 { format!("t{t}_{}", off / 32) } else { format!("((t{t}_{} >> {}u) & {:#x}u)", off / 32, off % 32, mask(bits)) };
+                self.line(&format!("uint t{t}c{k} = {raw};"));
+                unpack16(&format!("t{t}c{k}"), bits, fmt.num)
+            } else if k == 3 {
+                one.to_string()
+            } else {
+                "0u".to_string()
+            };
+            self.line(&format!("uint t{t}h{k} = {e};"));
+        }
+        for reg in 0..n.div_ceil(2) {
+            let d = Opnd::Vgpr(vd + reg as u8);
+            let lo = format!("t{t}h{}", reg * 2);
+            let v = if reg * 2 + 1 < n {
+                format!("{lo} | (t{t}h{} << 16)", reg * 2 + 1)
+            } else {
+                self.touch(&d);
+                format!("({} & 0xffff0000u) | {lo}", r(&d)?)
+            };
+            self.wv(&d, &v)?;
+        }
         Ok(())
     }
 }

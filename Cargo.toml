@@ -95,6 +95,7 @@ members = [
     "crates/compat/gamecoreclient",
     "crates/compat/dab",
     "crates/compat/bootshsvc",
+    "crates/compat/coniosrv",
     "crates/compat/netprofmsvc_c",
     "crates/compat/timebrokerserver",
     "crates/compat/console-sandbox",

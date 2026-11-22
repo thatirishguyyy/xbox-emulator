@@ -25,6 +25,12 @@ pub mod system;
 pub mod wstr;
 pub mod xvcmgmt;
 pub mod xvcsys;
+pub mod alpc;
+pub mod cfgmgr;
+pub mod condrv;
+pub mod conkbd;
+pub mod family;
+pub mod kbdlayout;
 
 #[link(name = "ntdll")]
 extern "system" {
@@ -35,10 +41,12 @@ pub fn root() -> PathBuf {
     compat_common::gdk::data_root().join("console")
 }
 
-unsafe extern "system" fn nt_close(h: usize) -> i32 {
+pub unsafe extern "system" fn nt_close(h: usize) -> i32 {
     if registry::close(h) {
         0
     } else {
+        alpc::before_close(h);
+        conkbd::before_close(h);
         xvcmgmt::before_close(h);
         NtClose(h)
     }
@@ -53,6 +61,8 @@ const THREADS: &[&str] = &["api-ms-win-core-processthreads-", "kernelbase", "ker
 const SERVICE: &[&str] = &["api-ms-win-service-", "advapi32", "sechost"];
 const RPC: &[&str] = &["rpcrt4"];
 const POWER: &[&str] = &["api-ms-win-power-setting-", "powrprof", "umpdc"];
+const DEVCFG: &[&str] = &["api-ms-win-devices-config-", "cfgmgr32"];
+const LOADER: &[&str] = &["api-ms-win-core-libraryloader-", "kernelbase", "kernel32"];
 
 macro_rules! hook {
     ($name:literal, $dlls:expr, $f:expr) => {
@@ -84,10 +94,10 @@ pub fn hooks() -> Vec<Hook> {
         hook!("NtDeleteValueKey", NTDLL, regnt::nt_delete_value_key),
         hook!("ZwDeleteValueKey", NTDLL, regnt::nt_delete_value_key),
         hook!("ZwFlushKey", NTDLL, registry::nt_flush_key),
-        hook!("NtOpenFile", NTDLL, xvcmgmt::nt_open_file),
-        hook!("ZwOpenFile", NTDLL, xvcmgmt::nt_open_file),
-        hook!("NtCreateFile", NTDLL, xvcmgmt::nt_create_file),
-        hook!("ZwCreateFile", NTDLL, xvcmgmt::nt_create_file),
+        hook!("NtOpenFile", NTDLL, condrv::nt_open_file),
+        hook!("ZwOpenFile", NTDLL, condrv::nt_open_file),
+        hook!("NtCreateFile", NTDLL, condrv::nt_create_file),
+        hook!("ZwCreateFile", NTDLL, condrv::nt_create_file),
         hook!("NtDeviceIoControlFile", NTDLL, xvcmgmt::nt_device_io_control_file),
         hook!("ZwDeviceIoControlFile", NTDLL, xvcmgmt::nt_device_io_control_file),
         hook!("NtCancelIoFile", NTDLL, xvcmgmt::nt_cancel_io_file),
@@ -165,6 +175,36 @@ pub fn hooks() -> Vec<Hook> {
         hook!("CloseServiceHandle", SERVICE, host::close_service_handle),
         hook!("QueryServiceStatusEx", SERVICE, host::query_service_status_ex),
         hook!("QueryServiceConfigW", SERVICE, host::query_service_config_w),
+        hook!("NtAlpcCreatePort", NTDLL, alpc::nt_alpc_create_port),
+        hook!("ZwAlpcCreatePort", NTDLL, alpc::nt_alpc_create_port),
+        hook!("NtAlpcConnectPort", NTDLL, alpc::nt_alpc_connect_port),
+        hook!("ZwAlpcConnectPort", NTDLL, alpc::nt_alpc_connect_port),
+        hook!("NtAlpcAcceptConnectPort", NTDLL, alpc::nt_alpc_accept_connect_port),
+        hook!("ZwAlpcAcceptConnectPort", NTDLL, alpc::nt_alpc_accept_connect_port),
+        hook!("NtAlpcSendWaitReceivePort", NTDLL, alpc::nt_alpc_send_wait_receive_port),
+        hook!("ZwAlpcSendWaitReceivePort", NTDLL, alpc::nt_alpc_send_wait_receive_port),
+        hook!("NtAlpcOpenSenderProcess", NTDLL, alpc::nt_alpc_open_sender_process),
+        hook!("ZwAlpcOpenSenderProcess", NTDLL, alpc::nt_alpc_open_sender_process),
+        hook!("NtAlpcCreatePortSection", NTDLL, alpc::nt_alpc_create_port_section),
+        hook!("ZwAlpcCreatePortSection", NTDLL, alpc::nt_alpc_create_port_section),
+        hook!("NtAlpcDeletePortSection", NTDLL, alpc::nt_alpc_delete_port_section),
+        hook!("ZwAlpcDeletePortSection", NTDLL, alpc::nt_alpc_delete_port_section),
+        hook!("NtAlpcCreateSectionView", NTDLL, alpc::nt_alpc_create_section_view),
+        hook!("ZwAlpcCreateSectionView", NTDLL, alpc::nt_alpc_create_section_view),
+        hook!("NtAlpcDeleteSectionView", NTDLL, alpc::nt_alpc_delete_section_view),
+        hook!("ZwAlpcDeleteSectionView", NTDLL, alpc::nt_alpc_delete_section_view),
+        hook!("NtAlpcDisconnectPort", NTDLL, alpc::nt_alpc_disconnect_port),
+        hook!("ZwAlpcDisconnectPort", NTDLL, alpc::nt_alpc_disconnect_port),
+        hook!("NtAlpcQueryInformationMessage", NTDLL, alpc::nt_alpc_query_information_message),
+        hook!("ZwAlpcQueryInformationMessage", NTDLL, alpc::nt_alpc_query_information_message),
+        hook!("NtReadFile", NTDLL, conkbd::nt_read_file),
+        hook!("ZwReadFile", NTDLL, conkbd::nt_read_file),
+        hook!("RtlGetDeviceFamilyInfoEnum", NTDLL, family::rtl_get_device_family_info_enum),
+        hook!("CM_Get_Device_Interface_List_SizeW", DEVCFG, cfgmgr::cm_get_device_interface_list_size_w),
+        hook!("CM_Get_Device_Interface_ListW", DEVCFG, cfgmgr::cm_get_device_interface_list_w),
+        hook!("CM_Register_Notification", DEVCFG, cfgmgr::cm_register_notification),
+        hook!("CM_Unregister_Notification", DEVCFG, cfgmgr::cm_unregister_notification),
+        hook!("LoadLibraryExW", LOADER, kbdlayout::load_library_ex_w),
     ]
 }
 
@@ -183,6 +223,11 @@ pub const PASSTHROUGH: &[&str] = &[
     "WriteFile", "ReadFile", "CompareStringOrdinal", "GetLocalTime", "GetTickCount", "GetSystemTimeAsFileTime", "HeapSetInformation", "HeapFree", "GetProcessHeap",
     "DecodePointer", "EncodePointer", "QueryPerformanceCounter", "UnregisterWaitEx", "TerminateProcess", "GetCurrentThread", "GetCurrentThreadId", "GetCurrentProcessId", "GetCurrentProcess", "SetThreadPriority",
     "GetPersistedRegistryLocationW", "SleepEx", "Sleep",
+    "AlpcInitializeMessageAttribute", "AlpcGetMessageAttribute", "NtCreateEvent", "NtWaitForMultipleObjects", "RtlCreateUserThread", "CreateThread", "CreatePipe",
+    "TrySubmitThreadpoolCallback", "DisableThreadLibraryCalls", "GetProcAddress", "FreeLibrary", "SetLastError", "CM_MapCrToWin32Err",
+    "RtlInitializeSRWLock", "RtlAcquireSRWLockExclusive", "RtlReleaseSRWLockExclusive", "RtlAcquireSRWLockShared", "RtlReleaseSRWLockShared",
+    "RtlCreateUnicodeString", "RtlFreeUnicodeString", "RtlCreateSecurityDescriptor", "RtlGetDaclSecurityDescriptor", "RtlSetDaclSecurityDescriptor",
+    "RtlCreateAcl", "RtlAddAccessAllowedAce", "RtlAllocateAndInitializeSid", "RtlLengthSid", "RtlFreeSid",
 ];
 
 pub unsafe fn imports(module: usize) -> Vec<(String, String)> {
