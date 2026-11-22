@@ -336,11 +336,14 @@ fn pso_metadata_resolves_mesh_structured_scalar_reads() {
     use tombox_xshader::meta::PsvResource;
     use tombox_xshader::psocache::{BindingLayout, UserDataBinding, UserDataKind};
 
-    let mut words = vec![
+    let mut words = console_ms(67, 1, TRI);
+    let param_export = words.len() - 3;
+    words.splice(param_export..param_export, [
         0xf408_0008, 0xfa00_0040, // Load the table descriptor into s0.
-        0xf424_0400, 0xfa00_0010, // Scalar dwordx2 read into s16.
-    ];
-    words.extend(console_ms(3, 1, 0));
+        0xf424_0400, 0xfa00_0050, // Read element 1, words 3 and 4.
+        vop1(1, 7, 16),
+        vop1(1, 8, 17),
+    ]);
     let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
     shader.resources.push(PsvResource { res_type: 5, lower: 7, upper: 7, space: 2 });
     let layout = BindingLayout {
@@ -357,7 +360,12 @@ fn pso_metadata_resolves_mesh_structured_scalar_reads() {
     assert!(translated.hlsl.contains("sbuf131079 : register(t7, space2);"));
     assert!(translated.hlsl.contains("tb_sbw_sbuf131079(t"));
     assert!(!translated.hlsl.contains("cbuffer"));
-    dxc::compile(&translated.hlsl, translated.profile).unwrap();
+    let mut data = [0u32; 34];
+    data[20..22].copy_from_slice(&[0x1234, 0x5678]);
+    let output = unsafe {
+        render_translated(&translated.hlsl, translated.profile, 1, Some(&data))
+    }.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(output, [0x1234, 0x5678, 0x77, 0x88]);
 }
 
 #[test]
@@ -511,17 +519,29 @@ fn bytecode(b: &[u8]) -> Vec<u8> {
 
 unsafe fn render(words: &[u32], groups: u32) -> Result<[u32; 4], String> {
     let t = translate(&ms(words, mesh_info(128, 128, 128, 2), pos_param_outs()))?;
-    let msb = dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).map_err(|e| format!("{e}\n{}", t.hlsl))?;
+    render_translated(&t.hlsl, &dxc::profile_for(t.profile), groups, None)
+}
+
+unsafe fn render_translated(
+    hlsl: &str, profile: &str, groups: u32, structured_data: Option<&[u32; 34]>,
+) -> Result<[u32; 4], String> {
+    let msb = dxc::compile(hlsl, profile).map_err(|e| format!("{e}\n{hlsl}"))?;
     let psb = dxc::compile(PS, "ps_6_5")?;
     let (mut gpu, kind) = mesh_gpu();
     eprintln!("mesh render on {kind}");
     let d3d12 = LoadLibraryA(b"d3d12.dll\0".as_ptr());
     let ser: unsafe extern "system" fn(*const u8, u32, *mut *mut c_void, *mut *mut c_void) -> i32 =
         core::mem::transmute(GetProcAddress(d3d12, b"D3D12SerializeRootSignature\0".as_ptr()));
-    let desc = [0u8; 40];
+    // One SRV range at t7, space2 for the structured-buffer fixture.
+    let range = [0u32, 1, 7, 2, 0];
+    let param = [0u64, 1, range.as_ptr() as u64, 0];
+    let mut desc = [0u64; 5];
+    if structured_data.is_some() {
+        desc[..2].copy_from_slice(&[1, param.as_ptr() as u64]);
+    }
     let mut blob: *mut c_void = core::ptr::null_mut();
     let mut err: *mut c_void = core::ptr::null_mut();
-    assert!(ser(desc.as_ptr(), 1, &mut blob, &mut err) >= 0);
+    assert!(ser(desc.as_ptr().cast(), 1, &mut blob, &mut err) >= 0);
     let mut rs: *mut c_void = core::ptr::null_mut();
     let hr = vcall!(gpu.device, 16, fn(u32, *const u8, usize, *const Guid, *mut *mut c_void) -> i32, 0, vcall!(blob, 3, fn() -> *const u8), vcall!(blob, 4, fn() -> usize), &d3d::IID_ROOTSIG, &mut rs);
     assert!(hr >= 0);
@@ -556,7 +576,7 @@ unsafe fn render(words: &[u32], groups: u32) -> Result<[u32; 4], String> {
     let mut pso: *mut c_void = core::ptr::null_mut();
     let hr = vcall!(dev2, 47, fn(*const u64, *const Guid, *mut *mut c_void) -> i32, sd.as_ptr(), &d3d::IID_PSO, &mut pso);
     if hr < 0 {
-        return Err(format!("CreatePipelineState(mesh) hr={:#010x}{}\n{}", hr as u32, gpu.messages(), t.hlsl));
+        return Err(format!("CreatePipelineState(mesh) hr={:#010x}{}\n{hlsl}", hr as u32, gpu.messages()));
     }
     let mut td = [0u8; 0x38];
     td[0..4].copy_from_slice(&3u32.to_le_bytes());
@@ -577,6 +597,19 @@ unsafe fn render(words: &[u32], groups: u32) -> Result<[u32; 4], String> {
     vcall!(l, 48, fn(usize, *const f32, u32, *const c_void) -> (), rtv, clear.as_ptr(), 0, core::ptr::null());
     vcall!(l, 46, fn(u32, *const usize, i32, *const usize) -> (), 1, &rtv, 0, core::ptr::null());
     vcall!(l, 30, fn(*mut c_void) -> (), rs);
+    let structured_resources = if let Some(data) = structured_data {
+        let bytes: Vec<_> = data.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let buffer = gpu.buffer(bytes.len() as u64, 2, 0xac3, false)?;
+        assert!(Gpu::map_write(buffer, &bytes));
+        let (heap, cpu, gpu_handle, _) = gpu.heap(0, 1, true)?;
+        let srv = [0u32, 1, 5768, 0, 0, 0, 2, 68, 0, 0];
+        vcall!(gpu.device, 18, fn(*mut c_void, *const u32, usize) -> (), buffer, srv.as_ptr(), cpu);
+        vcall!(l, 28, fn(u32, *const *mut c_void) -> (), 1, &heap);
+        vcall!(l, 32, fn(u32, u64) -> (), 0, gpu_handle);
+        Some((buffer, heap))
+    } else {
+        None
+    };
     vcall!(l, 25, fn(*mut c_void) -> (), pso);
     let vp = [0f32, 0., 1., 1., 0., 1.];
     vcall!(l, 21, fn(u32, *const f32) -> (), 1, vp.as_ptr());
@@ -599,6 +632,10 @@ unsafe fn render(words: &[u32], groups: u32) -> Result<[u32; 4], String> {
     src[0..8].copy_from_slice(&(rt as u64).to_le_bytes());
     vcall!(l, 16, fn(*const u8, u32, u32, u32, *const u8, *const c_void) -> (), dst2.as_ptr(), 0, 0, 0, src.as_ptr(), core::ptr::null());
     gpu.submit()?;
+    if let Some((buffer, heap)) = structured_resources {
+        d3d::release(buffer);
+        d3d::release(heap);
+    }
     let b = Gpu::map_read(rb, 16).ok_or("map readback")?;
     d3d::release(pso);
     d3d::release(dev2);
