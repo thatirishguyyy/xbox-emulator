@@ -1712,12 +1712,15 @@ impl<'a> Emitter<'a> {
 
     /// Resource a MUBUF instruction addresses when its descriptor is `slot` of `table`
     /// (also records declaration requirements).
-    fn mubuf_res(&mut self, ins: &Insn, slot: u32, table: u8, off: u32) -> Result<Res, String> {
+    fn mubuf_res(&mut self, ins: &Insn, slot: u32, table: u8, off: u32, pso_kind: Option<u32>) -> Result<Res, String> {
         if ins.enc == Enc::Mtbuf {
             return self.mtbuf_res(ins, slot, table, off);
         }
         let writes = ins.mnemonic.contains("store") || ins.mnemonic.contains("atomic") || self.uav_force.contains(&slot);
-        let kind = self.kind_at(table, off, writes)?;
+        let kind = match pso_kind {
+            Some(kind) => Some(kind),
+            None => self.kind_at(table, off, writes)?,
+        };
         if slot & BINDLESS != 0 && kind.is_some_and(|k| k <= 1) {
             if kind == Some(1) { self.bl_uav.insert(slot); } else { self.bl_srv.insert(slot); }
         }
@@ -2058,8 +2061,18 @@ impl<'a> Emitter<'a> {
                     })?;
                     let mut out: Vec<(u32, Res)> = Vec::new();
                     for (table, off) in &cands {
-                        let slot = self.bind_id(*table, *off, 32);
-                        out.push((((*table as u32) << 24) | off, self.mubuf_res(ins, slot, *table, *off)?));
+                        let binding = if self.is_ms()
+                            && self.ex.root_sig.is_none()
+                            && off & BINDLESS == 0
+                            && ins.mnemonic.starts_with("buffer_load_format_")
+                        {
+                            self.image_binding(*table, *off, &[3, 6])?
+                        } else {
+                            None
+                        };
+                        let slot = binding.map_or_else(|| self.bind_id(*table, *off, 32), |(slot, _)| slot);
+                        let kind = binding.map(|(_, ty)| u32::from(ty == 6));
+                        out.push((((*table as u32) << 24) | off, self.mubuf_res(ins, slot, *table, *off, kind)?));
                     }
                     self.res.insert(idx, vec![out[0].1]);
                     if out.len() > 1 {

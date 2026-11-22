@@ -237,6 +237,40 @@ fn mesh_clip_distance_export_maps_to_pos1() {
 }
 
 #[test]
+fn pso_metadata_resolves_a_mesh_typed_buffer_load() {
+    use tombox_xshader::hlsl::translate_with_image_layouts;
+    use tombox_xshader::meta::PsvResource;
+    use tombox_xshader::psocache::{BindingLayout, UserDataBinding, UserDataKind};
+
+    let mut words = vec![0xf408_0008, 0xfa00_0040, 0xe000_2000, 0x8000_0101];
+    words.extend(console_ms(3, 1, 0));
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    shader.resources = [2, 3].map(|space| PsvResource { res_type: 3, lower: 7, upper: 7, space }).to_vec();
+    let layout = |space: u32| BindingLayout {
+        metadata_index: 0,
+        entries: vec![UserDataBinding {
+            kind: UserDataKind::ShaderResource,
+            byte_offset: 64,
+            register: 7,
+            raw_fields: [0, (space << 16) | 0x804, 0, 0],
+        }],
+    };
+    assert!(translate(&shader).is_err());
+    let translated = translate_with_image_layouts(&shader, &[layout(2)]).unwrap();
+    assert!(translated.hlsl.contains("register(t7, space2)"), "{}", translated.hlsl);
+    dxc::compile(&translated.hlsl, translated.profile).unwrap();
+    let error = translate_with_image_layouts(&shader, &[layout(2), layout(3)]).err().unwrap();
+    assert!(error.contains("conflicting image layouts"), "{error}");
+
+    shader.resources[0].res_type = 6;
+    let mut uav = layout(2);
+    uav.entries[0].kind = UserDataKind::UnorderedAccess;
+    let translated = translate_with_image_layouts(&shader, &[uav]).unwrap();
+    assert!(translated.hlsl.contains("register(u7, space2)"), "{}", translated.hlsl);
+    dxc::compile(&translated.hlsl, translated.profile).unwrap();
+}
+
+#[test]
 fn mesh_refusals_are_explicit() {
     let base = console_ms(3, 1, 0);
     let mut mi = mesh_info(128, 128, 128, 2);
