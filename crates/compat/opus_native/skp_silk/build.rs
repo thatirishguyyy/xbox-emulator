@@ -14,6 +14,10 @@ const EXPORTS: [&str; 8] = [
 fn main() {
     let root = opus_root();
     rerun(&root);
+    if !opus_available(&root) {
+        println!("cargo:warning=Opus source tree not found at {}; skipping native build", root.display());
+        return;
+    }
     println!("cargo:rerun-if-changed=csrc/skp_silk.c");
     let mut b = opus_build(&root);
     b.files(opus_sources(&root, false));

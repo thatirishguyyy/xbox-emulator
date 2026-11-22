@@ -22,6 +22,12 @@ fn public_api(root: &Path) -> Vec<String> {
 fn main() {
     let root = opus_root();
     rerun(&root);
+    if !opus_available(&root) {
+        println!("cargo:warning=Opus source tree not found at {}; skipping native build", root.display());
+        let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+        let _ = std::fs::write(out_dir.join("exports.txt"), "");
+        return;
+    }
     let mut b = opus_build(&root);
     b.files(opus_sources(&root, true));
     b.compile("tombox_opus");

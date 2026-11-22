@@ -7,6 +7,10 @@ fn opus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../third_party/opus")
 }
 
+fn opus_available(root: &Path) -> bool {
+    root.join("celt_sources.mk").is_file()
+}
+
 fn mk_list(root: &Path, file: &str, var: &str) -> Vec<PathBuf> {
     let text = std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
     let mut out = Vec::new();
