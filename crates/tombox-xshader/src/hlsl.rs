@@ -2065,7 +2065,7 @@ impl<'a> Emitter<'a> {
                 Enc::Mubuf | Enc::Mtbuf => {
                     let rs = ins.src.get(1).and_then(sg).ok_or("mubuf: bad srsrc")?;
                     let rsym = sym.get(&rs).copied().or_else(|| (!written.contains(&rs)).then_some(Sym::Table(rs as u8)));
-                    if ins.mnemonic.starts_with("buffer_load_dword") {
+                    if ins.mnemonic.starts_with("buffer_load_dword") || ins.mnemonic.starts_with("tbuffer_load_") {
                         if let Some(slot) = self.raw_binding(rsym) {
                             self.res.insert(idx, vec![Res::RawSrv(slot)]);
                             continue;

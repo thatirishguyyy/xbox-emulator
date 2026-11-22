@@ -278,6 +278,8 @@ fn pso_metadata_resolves_a_direct_mesh_raw_buffer() {
 
     // Copy the direct user register, then read four dwords at byte offset 16.
     let mut words = vec![sop1(3, 28, 19), 0xf428_000e, 0xfa00_0010, 0xe034_1004, 0x8007_0401];
+    // Read three explicitly formatted 32-bit float components from the same raw SRV.
+    words.extend([0xe800_0000 | (74 << 19) | (2 << 16) | 4, 0x8007_0800]);
     words.extend(console_ms(3, 1, 0));
     let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
     shader.resources = [2, 3].map(|space| PsvResource { res_type: 4, lower: 7, upper: 7, space }).to_vec();
@@ -295,7 +297,7 @@ fn pso_metadata_resolves_a_direct_mesh_raw_buffer() {
     assert!(translate_with_image_layouts(&shader, &[layout(2), layout(3)]).is_err());
     let translated = translate_with_image_layouts(&shader, &[layout(2)]).unwrap();
     assert!(translated.hlsl.contains("ByteAddressBuffer raw131079 : register(t7, space2);"));
-    assert_eq!(translated.hlsl.matches("raw131079.Load(").count(), 6);
+    assert_eq!(translated.hlsl.matches("raw131079.Load(").count(), 9);
     dxc::compile(&translated.hlsl, translated.profile).unwrap();
 }
 

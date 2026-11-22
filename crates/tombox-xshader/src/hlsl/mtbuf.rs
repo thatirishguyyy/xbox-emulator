@@ -172,14 +172,18 @@ impl<'a> Emitter<'a> {
         let fmt = ufmt(ins.aux.imm2 as u32).ok_or_else(|| format!("mtbuf: invalid buffer format {}", ins.aux.imm2))?;
         let n = comps(&ins.mnemonic).ok_or("mtbuf: bad op")?;
         let store = ins.mnemonic.starts_with("tbuffer_store");
-        let (slot, is_uav) = match self.res.get(&idx).and_then(|v| v.first()) {
-            Some(Res::Buf(s, u)) => (*s, *u),
+        let (slot, is_uav, raw) = match self.res.get(&idx).and_then(|v| v.first()) {
+            Some(Res::Buf(s, u)) => (*s, *u, false),
+            Some(Res::RawSrv(s)) => (*s, false, true),
             _ => return Err("mtbuf: unresolved buffer".into()),
         };
         if store && !is_uav {
             return Err("tbuffer_store to a non-UAV table".into());
         }
         let (offen, idxen) = (ins.aux.mask & 1 != 0, ins.aux.mask & 2 != 0);
+        if raw && idxen {
+            return Err("raw PSO typed buffer read with IDXEN needs a descriptor stride".into());
+        }
         let a0 = ins.src[0];
         let a1 = match a0 {
             Opnd::Vgpr(v) => Opnd::Vgpr(v + 1),
@@ -212,7 +216,13 @@ impl<'a> Emitter<'a> {
         };
         let nm = if is_uav { format!("ubuf{slot}") } else { format!("sbuf{slot}") };
         let nwords = self.sbuf_words((is_uav, slot));
-        let el = |w: String| format!("{nm}[{index} + ({w}) / {nwords}u].w[({w}) % {nwords}u]");
+        let el = |w: String| {
+            if raw {
+                format!("raw{slot}.Load(({w}) * 4u)")
+            } else {
+                format!("{nm}[{index} + ({w}) / {nwords}u].w[({w}) % {nwords}u]")
+            }
+        };
         let t = self.tmp;
         self.tmp += 1;
         self.line(&format!("uint t{t}b = {byte}; uint t{t}w = t{t}b >> 2; uint t{t}s = (t{t}b & 3u) * 8u;"));
