@@ -72,8 +72,12 @@ fn main() -> ExitCode {
         }
     }
     if infer_root && ex.root_sig.is_none() {
-        if let Ok(signature) = tombox_xshader::infer_root_signature(&ex) {
-            ex.root_sig = Some(signature);
+        match tombox_xshader::infer_root_signature(&ex) {
+            Ok(signature) => ex.root_sig = Some(signature),
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
         }
     }
 

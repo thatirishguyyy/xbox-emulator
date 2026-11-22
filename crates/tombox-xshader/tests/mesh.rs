@@ -364,6 +364,21 @@ fn mesh_root_signature_inference_binds_typed_buffer_table() {
 }
 
 #[test]
+fn mesh_root_signature_inference_rejects_conflicting_descriptor_types() {
+    let mut words = vec![
+        0xf408_0008, 0xfa00_0020,
+        0xf424_0400, 0xfa00_0010,
+        0xe000_2000, 0x8000_0101,
+    ];
+    words.extend(console_ms(3, 1, 0));
+    let shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    let error = tombox_xshader::infer_root_signature(&shader).unwrap_err();
+    assert!(error.contains("table s16 slot 1 has conflicting range types 0 and 2"), "{error}");
+    let translation_error = tombox_xshader::translate_with_inference(&shader).err().unwrap();
+    assert_eq!(translation_error, error);
+}
+
+#[test]
 fn mesh_root_signature_inference_matches_psv_metadata() {
     use tombox_xshader::meta::PsvResource;
 

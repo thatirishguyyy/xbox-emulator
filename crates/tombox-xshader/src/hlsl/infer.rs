@@ -213,6 +213,12 @@ pub fn infer_root_signature(ex: &ShaderExtract) -> Result<RootSig, String> {
                 });
             }
             ranges.sort_by_key(|r| r.offset_in_table);
+            if let Some(pair) = ranges.windows(2).find(|pair| pair[0].offset_in_table == pair[1].offset_in_table) {
+                let slot = pair[0].offset_in_table;
+                let first = pair[0].range_type;
+                let second = pair[1].range_type;
+                return Err(format!("root signature inference: table s{s} slot {slot} has conflicting range types {first} and {second}"));
+            }
             params.push(RootParam {
                 visibility: 0,
                 kind: RootParamKind::Table(ranges),

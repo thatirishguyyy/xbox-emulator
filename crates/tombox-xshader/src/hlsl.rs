@@ -1016,9 +1016,7 @@ pub fn translate_with_inference(ex: &ShaderExtract) -> Result<Translated, String
         return translate(ex);
     }
     let mut inferred = ex.clone();
-    if let Ok(sig) = infer::infer_root_signature(ex) {
-        inferred.root_sig = Some(sig);
-    }
+    inferred.root_sig = Some(infer::infer_root_signature(ex)?);
     translate(&inferred)
 }
 
